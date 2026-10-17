@@ -124,35 +124,7 @@ runs:
         echo "|---------|------------------|-------------|" >> "$SUMMARY_FILE"
 
         if [ -f "composer.lock.old" ]; then
-          python3 -c '
-          import json, sys
-
-          summary_file = sys.argv[1]
-
-          try:
-              with open("composer.lock.old") as f:
-                  old_data = json.load(f)
-              with open("composer.lock") as f:
-                  new_data = json.load(f)
-
-              old_pkgs = {p["name"]: p["version"] for p in old_data.get("packages", [])}
-              new_pkgs = {p["name"]: p["version"] for p in new_data.get("packages", [])}
-
-              updated = []
-              for name, new_ver in sorted(new_pkgs.items()):
-                  old_ver = old_pkgs.get(name, "new")
-                  if old_ver != new_ver:
-                      updated.append(f"| `{name}` | `{old_ver}` | `{new_ver}` |")
-
-              with open(summary_file, "a") as out:
-                  if updated:
-                      out.write("\n".join(updated) + "\n")
-                  else:
-                      out.write("| No package version changes detected | - | - |\n")
-          except Exception as e:
-              with open(summary_file, "a") as out:
-                  out.write(f"| Error parsing lockfile | {e} | - |\n")
-          ' "$SUMMARY_FILE"
+          python3 "${{ github.action_path }}/summarize_update.py" "$SUMMARY_FILE"
         fi
 
         echo "" >> "$SUMMARY_FILE"
