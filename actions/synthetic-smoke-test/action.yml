@@ -163,7 +163,7 @@ runs:
         echo "ssl_days_remaining=$SSL_DAYS" >> "$GITHUB_OUTPUT"
 
         if [ "$SUCCESS" != "true" ] || [ "$PAYLOAD_FAIL" == "true" ]; then
-          echo "::error::Synthetic smoke test failed to meet availability or latency SLO thresholds."
+          echo "::error::Synthetic smoke test failed to meet availability or latency SLO thresholds (SUCCESS=$SUCCESS, PAYLOAD_FAIL=$PAYLOAD_FAIL, CHECK_RES=$CHECK_RES)."
           exit 1
         fi
 

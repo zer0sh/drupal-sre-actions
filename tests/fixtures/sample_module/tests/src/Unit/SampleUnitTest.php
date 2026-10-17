@@ -29,7 +29,8 @@ final class SampleUnitTest extends TestCase {
   public function testErrorBudgetCalculation(): void {
     $totalRequests = 100000;
     $failedRequests = 25;
-    $sloTarget = 0.999; // 99.9%
+    // 99.9% availability target.
+    $sloTarget = 0.999;
 
     $availability = ($totalRequests - $failedRequests) / $totalRequests;
 

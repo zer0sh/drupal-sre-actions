@@ -53,14 +53,14 @@ jobs:
       - name: Start local mock server
         run: |
           mkdir -p /tmp/mock_web
-          echo '{"status": "ok", "service": "drupal"}' > /tmp/mock_web/healthz
+          echo '<?php header("Content-Type: application/json"); echo json_encode(["status" => "ok", "service" => "drupal"]);' > /tmp/mock_web/index.php
           php -S 127.0.0.1:8085 -t /tmp/mock_web &
           sleep 2
 
       - name: Run Synthetic Smoke Test against local server
         uses: ./actions/synthetic-smoke-test
         with:
-          target-url: 'http://127.0.0.1:8085/healthz'
+          target-url: 'http://127.0.0.1:8085/index.php'
           expected-status: '200'
           max-ttfb-ms: '500'
           json-field-check: 'status == "ok"'
