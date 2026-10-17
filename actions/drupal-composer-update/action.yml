@@ -1,0 +1,199 @@
+name: 'Drupal Composer Automated Update'
+description: 'Automates Drupal core and contrib updates, generates dependency diffs, and creates pull requests.'
+author: 'Zero'
+
+inputs:
+  working-directory:
+    description: 'Path to directory containing composer.json'
+    required: false
+    default: '.'
+  php-version:
+    description: 'PHP version to use'
+    required: false
+    default: '8.2'
+  packages:
+    description: 'Specific packages to update (space-separated, e.g. "drupal/core-*"). Empty for all dependencies.'
+    required: false
+    default: ''
+  dependency-args:
+    description: 'Additional flags passed to composer update'
+    required: false
+    default: '--with-all-dependencies'
+  create-pr:
+    description: 'Whether to create a pull request if changes are detected'
+    required: false
+    default: 'true'
+  github-token:
+    description: 'GitHub token with contents and pull-requests write permissions'
+    required: false
+    default: ${{ github.token }}
+  branch-name:
+    description: 'Target branch name for the pull request'
+    required: false
+    default: 'chore/drupal-automated-updates'
+  base-branch:
+    description: 'Base branch for the pull request'
+    required: false
+    default: 'main'
+  pr-title:
+    description: 'Title for the pull request'
+    required: false
+    default: 'chore(deps): automated Drupal updates'
+  git-user-name:
+    description: 'Git committer name'
+    required: false
+    default: 'github-actions[bot]'
+  git-user-email:
+    description: 'Git committer email'
+    required: false
+    default: 'github-actions[bot]@users.noreply.github.com'
+
+outputs:
+  has-updates:
+    description: 'True if composer.lock was modified'
+    value: ${{ steps.check-diff.outputs.has_updates }}
+  updated-packages:
+    description: 'Summary table of updated packages'
+    value: ${{ steps.generate-summary.outputs.summary }}
+  pr-url:
+    description: 'URL of the created or updated pull request'
+    value: ${{ steps.create-pr.outputs.pr_url }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: ${{ inputs.php-version }}
+        tools: composer:v2
+        coverage: none
+
+    - name: Validate composer configuration
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        echo "Validating composer.json..."
+        composer validate --strict --no-check-all
+
+    - name: Snapshot lockfile before update
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        if [ -f "composer.lock" ]; then
+          cp composer.lock composer.lock.old
+        fi
+
+    - name: Execute composer update
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        CMD="composer update --no-interaction --no-progress"
+        if [ -n "${{ inputs.packages }}" ]; then
+          CMD="$CMD ${{ inputs.packages }}"
+        fi
+        if [ -n "${{ inputs.dependency-args }}" ]; then
+          CMD="$CMD ${{ inputs.dependency-args }}"
+        fi
+        echo "Executing: $CMD"
+        $CMD
+
+    - name: Check for modifications
+      id: check-diff
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        if git status --porcelain composer.lock | grep -q 'composer.lock'; then
+          echo "has_updates=true" >> "$GITHUB_OUTPUT"
+          echo "Updates detected in composer.lock."
+        else
+          echo "has_updates=false" >> "$GITHUB_OUTPUT"
+          echo "No updates detected."
+        fi
+
+    - name: Generate update summary
+      id: generate-summary
+      if: steps.check-diff.outputs.has_updates == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        SUMMARY_FILE="/tmp/composer_update_summary.md"
+        echo "### Drupal Dependency Update Report" > "$SUMMARY_FILE"
+        echo "" >> "$SUMMARY_FILE"
+        echo "| Package | Previous Version | New Version |" >> "$SUMMARY_FILE"
+        echo "|---------|------------------|-------------|" >> "$SUMMARY_FILE"
+
+        if [ -f "composer.lock.old" ]; then
+          python3 -c '
+        import json, sys
+
+        try:
+            with open("composer.lock.old") as f:
+                old_data = json.load(f)
+            with open("composer.lock") as f:
+                new_data = json.load(f)
+
+            old_pkgs = {p["name"]: p["version"] for p in old_data.get("packages", [])}
+            new_pkgs = {p["name"]: p["version"] for p in new_data.get("packages", [])}
+
+            updated = []
+            for name, new_ver in sorted(new_pkgs.items()):
+                old_ver = old_pkgs.get(name, "new")
+                if old_ver != new_ver:
+                    updated.append(f"| `{name}` | `{old_ver}` | `{new_ver}` |")
+
+            if updated:
+                with open("'"$SUMMARY_FILE"'", "a") as out:
+                    out.write("\n".join(updated) + "\n")
+            else:
+                with open("'"$SUMMARY_FILE"'", "a") as out:
+                    out.write("| No package version changes detected | - | - |\n")
+        except Exception as e:
+            with open("'"$SUMMARY_FILE"'", "a") as out:
+                out.write(f"| Error parsing lockfile | {e} | - |\n")
+        '
+        fi
+
+        echo "" >> "$SUMMARY_FILE"
+        echo "Triggered by GitHub Action \`drupal-composer-update\`." >> "$SUMMARY_FILE"
+
+        cat "$SUMMARY_FILE" >> "$GITHUB_STEP_SUMMARY"
+        {
+          echo "summary<<EOF"
+          cat "$SUMMARY_FILE"
+          echo "EOF"
+        } >> "$GITHUB_OUTPUT"
+        rm -f composer.lock.old
+
+    - name: Create or update Pull Request
+      id: create-pr
+      if: inputs.create-pr == 'true' && steps.check-diff.outputs.has_updates == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        git config user.name "${{ inputs.git-user-name }}"
+        git config user.email "${{ inputs.git-user-email }}"
+
+        BRANCH="${{ inputs.branch-name }}"
+        BASE="${{ inputs.base-branch }}"
+        TITLE="${{ inputs.pr-title }}"
+        BODY_FILE="/tmp/composer_update_summary.md"
+
+        git checkout -B "$BRANCH"
+        git add composer.json composer.lock
+        git commit -m "$TITLE"
+        git push origin "$BRANCH" --force
+
+        PR_URL=$(gh pr list --head "$BRANCH" --base "$BASE" --json url --jq '.[0].url' 2>/dev/null || true)
+        if [ -n "$PR_URL" ]; then
+          echo "Updating existing pull request: $PR_URL"
+          gh pr edit "$PR_URL" --title "$TITLE" --body-file "$BODY_FILE"
+        else
+          echo "Creating new pull request..."
+          PR_URL=$(gh pr create --head "$BRANCH" --base "$BASE" --title "$TITLE" --body-file "$BODY_FILE")
+        fi
+
+        echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+        echo "Pull Request ready: $PR_URL"

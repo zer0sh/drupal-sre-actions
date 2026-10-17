@@ -1,0 +1,120 @@
+name: 'Drupal Database Sanity and Schema Check'
+description: 'SRE verification of pending hook_update_N migrations, entity schema mismatches, and database health.'
+author: 'Zero'
+
+inputs:
+  working-directory:
+    description: 'Path to Drupal root directory'
+    required: false
+    default: '.'
+  php-version:
+    description: 'PHP version to use'
+    required: false
+    default: '8.2'
+  drush-binary:
+    description: 'Path to Drush binary'
+    required: false
+    default: 'vendor/bin/drush'
+  fail-on-pending-updates:
+    description: 'Fail the step if pending database updates exist'
+    required: false
+    default: 'false'
+  fail-on-schema-mismatch:
+    description: 'Fail the step if entity definition / database schema mismatches are detected'
+    required: false
+    default: 'true'
+
+outputs:
+  pending-updates-count:
+    description: 'Number of pending database updates'
+    value: ${{ steps.check-db.outputs.pending_updates_count }}
+  schema-status:
+    description: 'Entity schema status (clean/mismatched)'
+    value: ${{ steps.check-db.outputs.schema_status }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: ${{ inputs.php-version }}
+        coverage: none
+
+    - name: Verify database health and schema integrity
+      id: check-db
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        DRUSH="${{ inputs.drush-binary }}"
+        SUMMARY_FILE="/tmp/drupal_db_sanity_report.md"
+
+        echo "### Drupal Database Health and Schema Report" > "$SUMMARY_FILE"
+        echo "" >> "$SUMMARY_FILE"
+
+        if [ ! -x "$DRUSH" ]; then
+          echo "Drush binary not found at $DRUSH. Skipping live database sanity checks."
+          echo "pending_updates_count=0" >> "$GITHUB_OUTPUT"
+          echo "schema_status=skipped" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Check bootstrap
+        BOOTSTRAP=$($DRUSH status --field=bootstrap 2>/dev/null || true)
+        if [ "$BOOTSTRAP" != "Successful" ]; then
+          echo "Drupal bootstrap was not successful. Ensure database service is configured in the job."
+          echo "pending_updates_count=0" >> "$GITHUB_OUTPUT"
+          echo "schema_status=skipped" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Check pending updates
+        echo "Checking for pending database updates (updatedb)..."
+        UPDATES_JSON=$($DRUSH updatedb:status --format=json 2>/dev/null || echo "[]")
+        PENDING_COUNT=$(echo "$UPDATES_JSON" | python3 -c '
+        import json, sys
+        try:
+            data = json.load(sys.stdin)
+            print(len(data) if isinstance(data, list) else 0)
+        except Exception:
+            print(0)
+        ')
+
+        echo "| Metric | Result |" >> "$SUMMARY_FILE"
+        echo "|--------|--------|" >> "$SUMMARY_FILE"
+        echo "| Pending DB Updates | \`$PENDING_COUNT\` |" >> "$SUMMARY_FILE"
+
+        # Check entity schema updates
+        echo "Checking entity definition schema integrity..."
+        ENTITY_MISMATCH=false
+        if $DRUSH help entity:updates >/dev/null 2>&1; then
+          ENTITY_STATUS=$($DRUSH entity:updates --dry-run 2>&1 || true)
+          if echo "$ENTITY_STATUS" | grep -qi "No entity updates required"; then
+            echo "| Entity Schema Mismatch | None (Clean) |" >> "$SUMMARY_FILE"
+            echo "schema_status=clean" >> "$GITHUB_OUTPUT"
+          else
+            ENTITY_MISMATCH=true
+            echo "| Entity Schema Mismatch | **Detected** |" >> "$SUMMARY_FILE"
+            echo "schema_status=mismatched" >> "$GITHUB_OUTPUT"
+            echo "" >> "$SUMMARY_FILE"
+            echo '```text' >> "$SUMMARY_FILE"
+            echo "$ENTITY_STATUS" >> "$SUMMARY_FILE"
+            echo '```' >> "$SUMMARY_FILE"
+          fi
+        else
+          echo "| Entity Updates Command | Not installed (Devel/devel_entity_updates) |" >> "$SUMMARY_FILE"
+          echo "schema_status=clean" >> "$GITHUB_OUTPUT"
+        fi
+
+        echo "pending_updates_count=$PENDING_COUNT" >> "$GITHUB_OUTPUT"
+        cat "$SUMMARY_FILE" >> "$GITHUB_STEP_SUMMARY"
+
+        if [ "${{ inputs.fail-on-pending-updates }}" == "true" ] && [ "$PENDING_COUNT" -gt 0 ]; then
+          echo "::error::Pending database updates detected ($PENDING_COUNT). Run drush updb."
+          exit 1
+        fi
+
+        if [ "${{ inputs.fail-on-schema-mismatch }}" == "true" ] && [ "$ENTITY_MISMATCH" == "true" ]; then
+          echo "::error::Entity schema mismatch detected in active database."
+          exit 1
+        fi

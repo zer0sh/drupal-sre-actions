@@ -1,0 +1,117 @@
+name: 'Drupal Static Analysis and Deprecation Check'
+description: 'Runs PHPStan with phpstan-drupal to detect deprecations, type violations, and breaking API changes.'
+author: 'Zero'
+
+inputs:
+  working-directory:
+    description: 'Working directory path'
+    required: false
+    default: '.'
+  php-version:
+    description: 'PHP version to use'
+    required: false
+    default: '8.2'
+  paths:
+    description: 'Paths to analyze (space-separated)'
+    required: false
+    default: 'web/modules/custom'
+  level:
+    description: 'PHPStan rule level (0 to 9)'
+    required: false
+    default: '1'
+  memory-limit:
+    description: 'PHP memory limit for analysis'
+    required: false
+    default: '1G'
+  config-file:
+    description: 'Optional path to phpstan.neon configuration'
+    required: false
+    default: ''
+
+outputs:
+  status:
+    description: 'Analysis status (success/failure)'
+    value: ${{ steps.run-phpstan.outputs.status }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: ${{ inputs.php-version }}
+        tools: composer:v2
+        coverage: none
+
+    - name: Configure PHPStan with Drupal extensions
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        echo "Installing PHPStan and Drupal extensions globally in runner..."
+        composer global require --quiet --no-interaction \
+          phpstan/phpstan \
+          mglaman/phpstan-drupal \
+          phpstan/phpstan-deprecation-rules || true
+
+    - name: Register PHPStan problem matcher
+      shell: bash
+      run: |
+        MATCHER_FILE="/tmp/phpstan-matcher.json"
+        cat << 'EOF' > "$MATCHER_FILE"
+        {
+          "problemMatcher": [
+            {
+              "owner": "phpstan",
+              "pattern": [
+                {
+                  "regexp": "^\\s*(.*?):(\\d+):(.*)$",
+                  "file": 1,
+                  "line": 2,
+                  "message": 3
+                }
+              ]
+            }
+          ]
+        }
+        EOF
+        echo "::add-matcher::$MATCHER_FILE"
+
+    - name: Run PHPStan
+      id: run-phpstan
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        PHPSTAN="$(composer global config home)/vendor/bin/phpstan"
+        if [ ! -x "$PHPSTAN" ]; then
+          PHPSTAN="vendor/bin/phpstan"
+        fi
+
+        VALID_PATHS=""
+        for p in ${{ inputs.paths }}; do
+          if [ -d "$p" ] || [ -f "$p" ]; then
+            VALID_PATHS="$VALID_PATHS $p"
+          fi
+        done
+
+        if [ -z "$VALID_PATHS" ]; then
+          echo "No valid target paths found for static analysis among: ${{ inputs.paths }}"
+          echo "status=skipped" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        CMD="$PHPSTAN analyse --memory-limit=${{ inputs.memory-limit }} --error-format=table"
+        if [ -n "${{ inputs.config-file }}" ] && [ -f "${{ inputs.config-file }}" ]; then
+          CMD="$CMD -c ${{ inputs.config-file }}"
+        else
+          CMD="$CMD --level=${{ inputs.level }}"
+        fi
+
+        echo "Executing: $CMD $VALID_PATHS"
+        if $CMD $VALID_PATHS; then
+          echo "status=success" >> "$GITHUB_OUTPUT"
+        else
+          echo "status=failure" >> "$GITHUB_OUTPUT"
+          echo "::remove-matcher owner=phpstan::"
+          exit 1
+        fi
+        echo "::remove-matcher owner=phpstan::"

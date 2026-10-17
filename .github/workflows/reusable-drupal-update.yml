@@ -1,0 +1,57 @@
+name: 'Reusable Drupal Update Pipeline'
+
+on:
+  workflow_call:
+    inputs:
+      php-version:
+        type: string
+        required: false
+        default: '8.2'
+      packages:
+        type: string
+        required: false
+        default: ''
+      branch-name:
+        type: string
+        required: false
+        default: 'chore/drupal-automated-updates'
+      base-branch:
+        type: string
+        required: false
+        default: 'main'
+      pr-title:
+        type: string
+        required: false
+        default: 'chore(deps): automated Drupal updates'
+    secrets:
+      token:
+        required: false
+
+jobs:
+  drupal-update:
+    name: Drupal Composer Update
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.token || github.token }}
+          fetch-depth: 0
+
+      - name: Execute Drupal Composer Update
+        id: update
+        uses: ./actions/drupal-composer-update
+        with:
+          php-version: ${{ inputs.php-version }}
+          packages: ${{ inputs.packages }}
+          branch-name: ${{ inputs.branch-name }}
+          base-branch: ${{ inputs.base-branch }}
+          pr-title: ${{ inputs.pr-title }}
+          github-token: ${{ secrets.token || github.token }}
+
+      - name: Verify Updated Dependencies for Vulnerabilities
+        if: steps.update.outputs.has-updates == 'true'
+        uses: ./actions/composer-security-audit
+        with:
+          php-version: ${{ inputs.php-version }}
+          fail-on-vulnerability: 'true'

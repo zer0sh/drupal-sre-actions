@@ -1,0 +1,87 @@
+name: 'Reusable Drupal SRE CI'
+
+on:
+  workflow_call:
+    inputs:
+      php-version:
+        type: string
+        required: false
+        default: '8.2'
+      paths:
+        type: string
+        required: false
+        default: 'web/modules/custom web/themes/custom'
+      enable-phpstan:
+        type: boolean
+        required: false
+        default: true
+      enable-audit:
+        type: boolean
+        required: false
+        default: true
+      enable-secret-scan:
+        type: boolean
+        required: false
+        default: true
+      enable-config-drift:
+        type: boolean
+        required: false
+        default: true
+
+jobs:
+  code-quality:
+    name: Code Standards and Linting
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Run Drupal Code Standards
+        uses: ./actions/drupal-code-standards
+        with:
+          php-version: ${{ inputs.php-version }}
+          paths: ${{ inputs.paths }}
+
+  static-analysis:
+    name: Static Analysis & Deprecations
+    runs-on: ubuntu-latest
+    if: inputs.enable-phpstan == true
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Run Static Analysis
+        uses: ./actions/drupal-static-analysis
+        with:
+          php-version: ${{ inputs.php-version }}
+          paths: ${{ inputs.paths }}
+
+  security-gates:
+    name: Security & Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Run Secret Leak Detection
+        if: inputs.enable-secret-scan == true
+        uses: ./actions/secret-scan
+
+      - name: Run Composer Security Audit
+        if: inputs.enable-audit == true
+        uses: ./actions/composer-security-audit
+        with:
+          php-version: ${{ inputs.php-version }}
+
+  configuration-drift:
+    name: Configuration Drift Verification
+    runs-on: ubuntu-latest
+    if: inputs.enable-config-drift == true
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Detect Configuration Drift
+        uses: ./actions/drupal-config-drift
+        with:
+          php-version: ${{ inputs.php-version }}

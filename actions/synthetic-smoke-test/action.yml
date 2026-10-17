@@ -1,0 +1,184 @@
+name: 'Synthetic Smoke Test and SLO Probe'
+description: 'SRE synthetic health check evaluating HTTP status, TTFB latency SLO, TLS certificate expiry, and payload.'
+author: 'Zero'
+
+inputs:
+  target-url:
+    description: 'Target endpoint URL to probe (e.g., https://example.com/healthz)'
+    required: true
+  expected-status:
+    description: 'Expected HTTP status code'
+    required: false
+    default: '200'
+  max-ttfb-ms:
+    description: 'Maximum allowable Time-to-First-Byte in milliseconds (SLO threshold)'
+    required: false
+    default: '800'
+  ssl-min-days:
+    description: 'Minimum days before SSL certificate expiration'
+    required: false
+    default: '14'
+  json-field-check:
+    description: 'Optional Python expression or JSON key to verify (e.g., status == "ok")'
+    required: false
+    default: ''
+  retries:
+    description: 'Number of probe retry attempts'
+    required: false
+    default: '3'
+  retry-delay-seconds:
+    description: 'Delay between retries in seconds'
+    required: false
+    default: '5'
+
+outputs:
+  http-status:
+    description: 'Returned HTTP status code'
+    value: ${{ steps.probe.outputs.http_status }}
+  ttfb-ms:
+    description: 'Observed Time-To-First-Byte in milliseconds'
+    value: ${{ steps.probe.outputs.ttfb_ms }}
+  total-time-ms:
+    description: 'Total request duration in milliseconds'
+    value: ${{ steps.probe.outputs.total_time_ms }}
+  ssl-days-remaining:
+    description: 'Days remaining before TLS certificate expiration'
+    value: ${{ steps.probe.outputs.ssl_days_remaining }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Run synthetic health and latency probe
+      id: probe
+      shell: bash
+      run: |
+        URL="${{ inputs.target-url }}"
+        EXPECTED_STATUS="${{ inputs.expected-status }}"
+        MAX_TTFB="${{ inputs.max-ttfb-ms }}"
+        SSL_MIN_DAYS="${{ inputs.ssl-min-days }}"
+        RETRIES="${{ inputs.retries }}"
+        DELAY="${{ inputs.retry-delay-seconds }}"
+        SUMMARY_FILE="/tmp/synthetic_smoke_test_report.md"
+
+        echo "### Synthetic Smoke Test & SLO Report" > "$SUMMARY_FILE"
+        echo "" >> "$SUMMARY_FILE"
+        echo "Target URL: \`$URL\`" >> "$SUMMARY_FILE"
+        echo "" >> "$SUMMARY_FILE"
+
+        SUCCESS=false
+        ATTEMPT=1
+
+        while [ "$ATTEMPT" -le "$RETRIES" ]; do
+          echo "Probe attempt $ATTEMPT of $RETRIES..."
+          RESPONSE_FILE="/tmp/probe_response.txt"
+          
+          # Use curl with write-out formatting
+          METRICS=$(curl -s -S -o "$RESPONSE_FILE" \
+            -w "%{http_code} %{time_starttransfer} %{time_total}" \
+            --connect-timeout 10 \
+            --max-time 30 \
+            "$URL" || echo "000 0 0")
+
+          STATUS=$(echo "$METRICS" | awk '{print $1}')
+          TTFB_SEC=$(echo "$METRICS" | awk '{print $2}')
+          TOTAL_SEC=$(echo "$METRICS" | awk '{print $3}')
+
+          TTFB_MS=$(python3 -c "print(int(float('$TTFB_SEC') * 1000))")
+          TOTAL_MS=$(python3 -c "print(int(float('$TOTAL_SEC') * 1000))")
+
+          echo "Attempt $ATTEMPT: HTTP $STATUS, TTFB: ${TTFB_MS}ms, Total: ${TOTAL_MS}ms"
+
+          if [ "$STATUS" == "$EXPECTED_STATUS" ] && [ "$TTFB_MS" -le "$MAX_TTFB" ]; then
+            SUCCESS=true
+            break
+          fi
+
+          if [ "$ATTEMPT" -lt "$RETRIES" ]; then
+            sleep "$DELAY"
+          fi
+          ATTEMPT=$((ATTEMPT + 1))
+        done
+
+        # SSL certificate expiration check if HTTPS
+        SSL_DAYS="N/A"
+        if [[ "$URL" =~ ^https:// ]]; then
+          DOMAIN=$(echo "$URL" | awk -F[/:] '{print $4}')
+          PORT=$(echo "$URL" | awk -F[/:] '{print $5}')
+          if [ -z "$PORT" ]; then PORT=443; fi
+
+          EXPIRY_DATE=$(openssl s_client -servername "$DOMAIN" -connect "$DOMAIN:$PORT" </dev/null 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2 || true)
+          if [ -n "$EXPIRY_DATE" ]; then
+            SSL_DAYS=$(python3 -c "
+        from datetime import datetime
+        import email.utils
+        exp = '$EXPIRY_DATE'
+        # Parse openssl date format
+        try:
+            dt = datetime.strptime(exp, '%b %d %H:%M:%S %Y %Z')
+            now = datetime.utcnow()
+            diff = (dt - now).days
+            print(diff)
+        except Exception:
+            print('Unknown')
+        ")
+          fi
+        fi
+
+        echo "| Metric | Measured | Threshold / Expected | Status |" >> "$SUMMARY_FILE"
+        echo "|--------|----------|----------------------|--------|" >> "$SUMMARY_FILE"
+
+        STATUS_ICON="PASS"
+        if [ "$STATUS" != "$EXPECTED_STATUS" ]; then STATUS_ICON="FAIL"; fi
+        echo "| HTTP Status Code | \`$STATUS\` | \`$EXPECTED_STATUS\` | $STATUS_ICON |" >> "$SUMMARY_FILE"
+
+        TTFB_ICON="PASS"
+        if [ "$TTFB_MS" -gt "$MAX_TTFB" ]; then TTFB_ICON="FAIL (SLO breach)"; fi
+        echo "| TTFB (Latency) | \`${TTFB_MS}ms\` | \`<=${MAX_TTFB}ms\` | $TTFB_ICON |" >> "$SUMMARY_FILE"
+
+        echo "| Total Request Time | \`${TOTAL_MS}ms\` | - | INFO |" >> "$SUMMARY_FILE"
+
+        SSL_ICON="PASS"
+        if [ "$SSL_DAYS" != "N/A" ] && [ "$SSL_DAYS" != "Unknown" ]; then
+          if [ "$SSL_DAYS" -lt "$SSL_MIN_DAYS" ]; then SSL_ICON="FAIL (Expiring soon)"; fi
+          echo "| TLS Certificate Expiry | \`$SSL_DAYS days\` | \`>=$SSL_MIN_DAYS days\` | $SSL_ICON |" >> "$SUMMARY_FILE"
+        fi
+
+        # Optional JSON field validation
+        PAYLOAD_FAIL=false
+        if [ -n "${{ inputs.json-field-check }}" ]; then
+          CHECK_RES=$(python3 -c '
+        import json, sys
+        expr = """${{ inputs.json-field-check }}"""
+        try:
+            with open("/tmp/probe_response.txt") as f:
+                data = json.load(f)
+            # Evaluate expression in scope of data
+            valid = eval(expr, {}, data)
+            print("OK" if valid else "FAIL")
+        except Exception as e:
+            print(f"ERROR: {e}")
+        ')
+          if [ "$CHECK_RES" != "OK" ]; then
+            PAYLOAD_FAIL=true
+            echo "| Payload Validation | \`$CHECK_RES\` | \`${{ inputs.json-field-check }}\` | FAIL |" >> "$SUMMARY_FILE"
+          else
+            echo "| Payload Validation | \`OK\` | \`${{ inputs.json-field-check }}\` | PASS |" >> "$SUMMARY_FILE"
+          fi
+        fi
+
+        cat "$SUMMARY_FILE" >> "$GITHUB_STEP_SUMMARY"
+
+        echo "http_status=$STATUS" >> "$GITHUB_OUTPUT"
+        echo "ttfb_ms=$TTFB_MS" >> "$GITHUB_OUTPUT"
+        echo "total_time_ms=$TOTAL_MS" >> "$GITHUB_OUTPUT"
+        echo "ssl_days_remaining=$SSL_DAYS" >> "$GITHUB_OUTPUT"
+
+        if [ "$SUCCESS" != "true" ] || [ "$PAYLOAD_FAIL" == "true" ]; then
+          echo "::error::Synthetic smoke test failed to meet availability or latency SLO thresholds."
+          exit 1
+        fi
+
+        if [ "$SSL_DAYS" != "N/A" ] && [ "$SSL_DAYS" != "Unknown" ] && [ "$SSL_DAYS" -lt "$SSL_MIN_DAYS" ]; then
+          echo "::error::TLS certificate expires in $SSL_DAYS days (below minimum threshold of $SSL_MIN_DAYS days)."
+          exit 1
+        fi

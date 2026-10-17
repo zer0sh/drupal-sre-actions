@@ -1,0 +1,121 @@
+name: 'Secret Leak Detection'
+description: 'SRE security gate preventing hardcoded credentials, tokens, and private keys from leaking into version control.'
+author: 'Zero'
+
+inputs:
+  working-directory:
+    description: 'Path to repository root'
+    required: false
+    default: '.'
+  fail-on-secrets:
+    description: 'Fail the step if secrets or high-entropy credentials are detected'
+    required: false
+    default: 'true'
+
+outputs:
+  secrets-detected:
+    description: 'True if potential secrets or credentials were found'
+    value: ${{ steps.scan.outputs.secrets_detected }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Run TruffleHog / Gitleaks credential scanner
+      id: scan
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        SUMMARY_FILE="/tmp/secret_scan_report.md"
+        echo "### Secret Leak Prevention Report" > "$SUMMARY_FILE"
+        echo "" >> "$SUMMARY_FILE"
+
+        echo "Installing Gitleaks binary..."
+        ARCH=$(uname -m)
+        case "$ARCH" in
+          x86_64) GITLEAKS_ARCH="x64" ;;
+          aarch64) GITLEAKS_ARCH="arm64" ;;
+          *) GITLEAKS_ARCH="x64" ;;
+        esac
+
+        curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v8.18.2/gitleaks_8.18.2_linux_${GITLEAKS_ARCH}.tar.gz" | tar -xz -C /tmp gitleaks 2>/dev/null || true
+
+        if [ -x "/tmp/gitleaks" ]; then
+          REPORT_FILE="/tmp/gitleaks-report.json"
+          /tmp/gitleaks detect --source=. --no-git --report-path="$REPORT_FILE" --report-format=json --exit-code=0 || true
+
+          python3 -c '
+        import json, sys
+
+        summary = "'"$SUMMARY_FILE"'"
+        report = "'"$REPORT_FILE"'"
+
+        try:
+            with open(report, "r") as f:
+                data = json.load(f)
+        except Exception:
+            data = []
+
+        with open(summary, "a") as sf:
+            if data:
+                sf.write(f"**Alert:** Found {len(data)} potential secret(s) or exposed token(s).\n\n")
+                sf.write("| Rule | File | Secret Hash / Snippet |\n")
+                sf.write("|------|------|------------------------|\n")
+                for item in data:
+                    rule = item.get("RuleID", "Unknown")
+                    file = item.get("File", "")
+                    secret = item.get("Secret", "")
+                    redacted = secret[:4] + "****" if len(secret) > 4 else "****"
+                    sf.write(f"| `{rule}` | `{file}` | `{redacted}` |\n")
+            else:
+                sf.write("No hardcoded secrets or credentials detected.\n")
+
+        with open("'"$GITHUB_OUTPUT"'", "a") as out:
+            out.write(f"secrets_detected={'true' if data else 'false'}\n")
+        '
+        else
+          echo "Fallback to internal regex scan for secrets..."
+          python3 -c '
+        import os, re, sys
+
+        SECRET_PATTERNS = [
+            (r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?token)\s*[:=]\s*[\"\x27][A-Za-z0-9_\-]{16,}[\"\x27]", "Generic API Key"),
+            (r"-----BEGIN (RSA|OPENSSH|DSA|EC) PRIVATE KEY-----", "Private Key"),
+            (r"(?i)drupal_hash_salt\s*[:=]\s*[\"\x27][A-Za-z0-9_\-]{16,}[\"\x27]", "Drupal Hash Salt"),
+            (r"(?i)mysql://[^:]+:[^@]+@[^/]+", "Database URL with Password"),
+        ]
+
+        found = []
+        for root, dirs, files in os.walk("."):
+            if ".git" in dirs: dirs.remove(".git")
+            if "vendor" in dirs: dirs.remove("vendor")
+            if "node_modules" in dirs: dirs.remove("node_modules")
+            for f in files:
+                fpath = os.path.join(root, f)
+                try:
+                    with open(fpath, "r", encoding="utf-8", errors="ignore") as content_file:
+                        txt = content_file.read()
+                        for pattern, label in SECRET_PATTERNS:
+                            if re.search(pattern, txt):
+                                found.append((label, fpath))
+                except Exception:
+                    pass
+
+        with open("'"$SUMMARY_FILE"'", "a") as sf:
+            if found:
+                sf.write(f"**Alert:** Found {len(found)} potential secret matches.\n\n")
+                for label, fpath in found:
+                    sf.write(f"- `{label}` detected in `{fpath}`\n")
+            else:
+                sf.write("No hardcoded secrets detected.\n")
+
+        with open("'"$GITHUB_OUTPUT"'", "a") as out:
+            out.write(f"secrets_detected={'true' if found else 'false'}\n")
+        '
+        fi
+
+        cat "$SUMMARY_FILE" >> "$GITHUB_STEP_SUMMARY"
+
+        if [ "${{ inputs.fail-on-secrets }}" == "true" ] && grep -q 'secrets_detected=true' "$GITHUB_OUTPUT"; then
+          echo "::error::Credentials or secrets detected in repository! Revoke and remove immediately."
+          exit 1
+        fi

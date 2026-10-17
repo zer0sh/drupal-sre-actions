@@ -1,0 +1,207 @@
+name: 'Drupal Code Standards and Linting'
+description: 'Runs PHPCS (Drupal & DrupalPractice), Twig linting, and YAML syntax validation with SRE reporting.'
+author: 'Zero'
+
+inputs:
+  working-directory:
+    description: 'Working directory path'
+    required: false
+    default: '.'
+  php-version:
+    description: 'PHP version to use'
+    required: false
+    default: '8.2'
+  paths:
+    description: 'Paths to analyze (space-separated)'
+    required: false
+    default: 'web/modules/custom web/themes/custom'
+  standard:
+    description: 'PHPCS standard(s) to enforce'
+    required: false
+    default: 'Drupal,DrupalPractice'
+  extensions:
+    description: 'Comma-separated file extensions to validate'
+    required: false
+    default: 'php,module,theme,install,inc,profile,test'
+  ignore-patterns:
+    description: 'Comma-separated ignore patterns'
+    required: false
+    default: '*.min.js,*.min.css,vendor,node_modules'
+  fail-on-warning:
+    description: 'Fail step when warnings are detected'
+    required: false
+    default: 'false'
+  check-twig:
+    description: 'Run Twig syntax and standards validation'
+    required: false
+    default: 'true'
+  check-yaml:
+    description: 'Run YAML syntax validation on custom configuration'
+    required: false
+    default: 'true'
+
+outputs:
+  phpcs-status:
+    description: 'Status of PHPCS analysis (success/failure)'
+    value: ${{ steps.run-phpcs.outputs.status }}
+  twig-status:
+    description: 'Status of Twig linting (success/failure)'
+    value: ${{ steps.run-twig.outputs.status }}
+  yaml-status:
+    description: 'Status of YAML linting (success/failure)'
+    value: ${{ steps.run-yaml.outputs.status }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: ${{ inputs.php-version }}
+        tools: phpcs, composer:v2
+        coverage: none
+
+    - name: Configure Drupal standards in PHPCS
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        if [ ! -d "/tmp/coder" ]; then
+          echo "Installing drupal/coder standards globally in runner..."
+          composer global require --quiet --no-interaction drupal/coder
+        fi
+        CODER_DIR="$(composer global config home)/vendor/drupal/coder/coder_sniffer"
+        phpcs --config-set installed_paths "$CODER_DIR"
+
+    - name: Register PHPCS problem matcher
+      shell: bash
+      run: |
+        MATCHER_FILE="/tmp/phpcs-problem-matcher.json"
+        cat << 'EOF' > "$MATCHER_FILE"
+        {
+          "problemMatcher": [
+            {
+              "owner": "phpcs",
+              "pattern": [
+                {
+                  "regexp": "^\\s*(\\d+)\\s*\\|\\s*(ERROR|WARNING)\\s*\\|\\s*(.*)$",
+                  "line": 1,
+                  "severity": 2,
+                  "message": 3
+                },
+                {
+                  "regexp": "^FILE:\\s+(.*)$",
+                  "file": 1
+                }
+              ]
+            }
+          ]
+        }
+        EOF
+        echo "::add-matcher::$MATCHER_FILE"
+
+    - name: Run PHPCS analysis
+      id: run-phpcs
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        VALID_PATHS=""
+        for p in ${{ inputs.paths }}; do
+          if [ -d "$p" ] || [ -f "$p" ]; then
+            VALID_PATHS="$VALID_PATHS $p"
+          fi
+        done
+
+        if [ -z "$VALID_PATHS" ]; then
+          echo "No valid target paths found for PHPCS among: ${{ inputs.paths }}"
+          echo "status=skipped" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        FLAGS="--standard=${{ inputs.standard }} --extensions=${{ inputs.extensions }} --ignore=${{ inputs.ignore-patterns }}"
+        if [ "${{ inputs.fail-on-warning }}" != "true" ]; then
+          FLAGS="$FLAGS -n"
+        fi
+
+        echo "Running: phpcs $FLAGS $VALID_PATHS"
+        if phpcs $FLAGS $VALID_PATHS; then
+          echo "status=success" >> "$GITHUB_OUTPUT"
+        else
+          echo "status=failure" >> "$GITHUB_OUTPUT"
+          echo "::remove-matcher owner=phpcs::"
+          exit 1
+        fi
+        echo "::remove-matcher owner=phpcs::"
+
+    - name: Run Twig linting
+      id: run-twig
+      if: inputs.check-twig == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        echo "Running Twig syntax validation..."
+        TWIG_FILES=$(find ${{ inputs.paths }} -type f -name "*.twig" 2>/dev/null || true)
+        if [ -z "$TWIG_FILES" ]; then
+          echo "No Twig templates found in target paths."
+          echo "status=skipped" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        composer global require --quiet --no-interaction vincentlanglet/twig-cs-fixer || true
+        TWIG_CS="$(composer global config home)/vendor/bin/twig-cs-fixer"
+
+        if [ -x "$TWIG_CS" ]; then
+          if "$TWIG_CS" lint ${{ inputs.paths }}; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=failure" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+        else
+          echo "Twig-CS-Fixer not available; fallback to python jinja/twig syntax parser."
+          python3 -c '
+        import sys, glob
+        errors = 0
+        for path in sys.argv[1:]:
+            for f in glob.glob(f"{path}/**/*.twig", recursive=True):
+                with open(f, "r", encoding="utf-8", errors="ignore") as tf:
+                    content = tf.read()
+                    # Check matching tags
+                    if content.count("{%") != content.count("%}"):
+                        print(f"Error in {f}: Unmatched {{% ... %}} tags.")
+                        errors += 1
+                    if content.count("{{") != content.count("}}"):
+                        print(f"Error in {f}: Unmatched {{{{ ... }}}} tags.")
+                        errors += 1
+        sys.exit(1 if errors > 0 else 0)
+        ' ${{ inputs.paths }}
+          echo "status=success" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Run YAML syntax validation
+      id: run-yaml
+      if: inputs.check-yaml == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        echo "Running YAML syntax validation on configuration and module files..."
+        python3 -c '
+        import sys, glob, yaml
+
+        has_error = False
+        valid_paths = [p for p in sys.argv[1:]]
+
+        for p in valid_paths:
+            for filepath in glob.glob(f"{p}/**/*.yml", recursive=True) + glob.glob(f"{p}/**/*.yaml", recursive=True):
+                if "node_modules" in filepath or "vendor" in filepath:
+                    continue
+                try:
+                    with open(filepath, "r", encoding="utf-8") as yf:
+                        yaml.safe_load(yf)
+                except Exception as exc:
+                    print(f"::error file={filepath}::YAML syntax error: {exc}")
+                    has_error = True
+
+        if has_error:
+            sys.exit(1)
+        ' ${{ inputs.paths }}
+        echo "status=success" >> "$GITHUB_OUTPUT"

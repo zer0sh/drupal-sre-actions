@@ -1,0 +1,19 @@
+# Composer
+vendor/
+composer.phar
+
+# Node
+node_modules/
+
+# OS and IDE files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# Test artifacts and temporary files
+tmp/
+*.tmp
+*.log

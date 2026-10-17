@@ -1,0 +1,130 @@
+name: 'Drupal Configuration Drift Detection'
+description: 'Detects discrepancies between version-controlled config/sync YAMLs and active Drupal configuration.'
+author: 'Zero'
+
+inputs:
+  working-directory:
+    description: 'Path to Drupal root directory'
+    required: false
+    default: '.'
+  php-version:
+    description: 'PHP version to use'
+    required: false
+    default: '8.2'
+  drush-binary:
+    description: 'Path to Drush binary'
+    required: false
+    default: 'vendor/bin/drush'
+  sync-directory:
+    description: 'Relative path to configuration sync directory'
+    required: false
+    default: 'config/sync'
+  fail-on-drift:
+    description: 'Fail the action if configuration drift is found'
+    required: false
+    default: 'true'
+
+outputs:
+  drift-detected:
+    description: 'True if uncommitted or unsynced changes were detected'
+    value: ${{ steps.detect-drift.outputs.drift_detected }}
+  diff-summary:
+    description: 'Summary of drifted configuration files'
+    value: ${{ steps.detect-drift.outputs.diff_summary }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: ${{ inputs.php-version }}
+        coverage: none
+
+    - name: Validate sync directory existence and YAML syntax
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        SYNC_DIR="${{ inputs.sync-directory }}"
+        if [ ! -d "$SYNC_DIR" ]; then
+          echo "::error::Configuration sync directory '$SYNC_DIR' does not exist."
+          exit 1
+        fi
+
+        echo "Validating YAML integrity in $SYNC_DIR..."
+        python3 -c '
+        import os, sys, yaml
+
+        sync_dir = "'"$SYNC_DIR"'"
+        errors = 0
+        total = 0
+
+        for root, _, files in os.walk(sync_dir):
+            for file in files:
+                if file.endswith((".yml", ".yaml")):
+                    total += 1
+                    fpath = os.path.join(root, file)
+                    try:
+                        with open(fpath, "r", encoding="utf-8") as f:
+                            yaml.safe_load(f)
+                    except Exception as e:
+                        print(f"::error file={fpath}::Invalid YAML in config sync: {e}")
+                        errors += 1
+
+        print(f"Validated {total} configuration files with {errors} errors.")
+        if errors > 0:
+            sys.exit(1)
+        '
+
+    - name: Detect configuration drift
+      id: detect-drift
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        DRUSH="${{ inputs.drush-binary }}"
+        SUMMARY_FILE="/tmp/drupal_config_drift_report.md"
+        echo "### Drupal Configuration Drift Report" > "$SUMMARY_FILE"
+        echo "" >> "$SUMMARY_FILE"
+
+        if [ -x "$DRUSH" ] && $DRUSH status --format=json 2>/dev/null | grep -q '"bootstrap":"Successful"'; then
+          echo "Drupal bootstrap is active. Inspecting live configuration status..."
+          
+          DIFF_OUTPUT=$($DRUSH config:status --format=json 2>/dev/null || echo "[]")
+          DIFF_COUNT=$(echo "$DIFF_OUTPUT" | python3 -c 'import sys, json; print(len(json.load(sys.stdin)))' 2>/dev/null || echo "0")
+
+          if [ "$DIFF_COUNT" -gt 0 ]; then
+            echo "drift_detected=true" >> "$GITHUB_OUTPUT"
+            echo "**Alert:** $DIFF_COUNT configuration discrepancies detected between database and sync directory." >> "$SUMMARY_FILE"
+            echo "" >> "$SUMMARY_FILE"
+            echo '```diff' >> "$SUMMARY_FILE"
+            $DRUSH config:diff >> "$SUMMARY_FILE" 2>&1 || true
+            echo '```' >> "$SUMMARY_FILE"
+            echo "diff_summary=$DIFF_COUNT files drifted" >> "$GITHUB_OUTPUT"
+          else
+            echo "drift_detected=false" >> "$GITHUB_OUTPUT"
+            echo "No configuration drift detected. Database and sync directory are synchronized." >> "$SUMMARY_FILE"
+            echo "diff_summary=clean" >> "$GITHUB_OUTPUT"
+          fi
+        else
+          echo "No active Drupal database bootstrap found. Checking Git working tree for uncommitted sync files..."
+          GIT_CHANGES=$(git status --porcelain "${{ inputs.sync-directory }}" || true)
+          if [ -n "$GIT_CHANGES" ]; then
+            echo "drift_detected=true" >> "$GITHUB_OUTPUT"
+            echo "**Alert:** Uncommitted configuration changes found in ${{ inputs.sync-directory }}:" >> "$SUMMARY_FILE"
+            echo '```text' >> "$SUMMARY_FILE"
+            echo "$GIT_CHANGES" >> "$SUMMARY_FILE"
+            echo '```' >> "$SUMMARY_FILE"
+            echo "diff_summary=uncommitted changes detected in sync directory" >> "$GITHUB_OUTPUT"
+          else
+            echo "drift_detected=false" >> "$GITHUB_OUTPUT"
+            echo "Configuration sync directory is clean in git index." >> "$SUMMARY_FILE"
+            echo "diff_summary=clean" >> "$GITHUB_OUTPUT"
+          fi
+        fi
+
+        cat "$SUMMARY_FILE" >> "$GITHUB_STEP_SUMMARY"
+
+        if [ "${{ inputs.fail-on-drift }}" == "true" ] && [ "$(cat $GITHUB_OUTPUT | grep 'drift_detected=true' || true)" ]; then
+          echo "::error::Configuration drift detected! Sync directory must match active state."
+          exit 1
+        fi

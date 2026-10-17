@@ -1,0 +1,41 @@
+name: 'Reusable Post-Deployment Smoke Test'
+
+on:
+  workflow_call:
+    inputs:
+      target-url:
+        type: string
+        required: true
+      expected-status:
+        type: string
+        required: false
+        default: '200'
+      max-ttfb-ms:
+        type: string
+        required: false
+        default: '800'
+      ssl-min-days:
+        type: string
+        required: false
+        default: '14'
+      json-field-check:
+        type: string
+        required: false
+        default: ''
+
+jobs:
+  smoke-test:
+    name: SRE Synthetic Probe & SLO Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Execute Synthetic Health Probe
+        uses: ./actions/synthetic-smoke-test
+        with:
+          target-url: ${{ inputs.target-url }}
+          expected-status: ${{ inputs.expected-status }}
+          max-ttfb-ms: ${{ inputs.max-ttfb-ms }}
+          ssl-min-days: ${{ inputs.ssl-min-days }}
+          json-field-check: ${{ inputs.json-field-check }}
