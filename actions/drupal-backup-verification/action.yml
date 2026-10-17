@@ -1,0 +1,137 @@
+name: 'Drupal Backup Restoration Verification'
+description: 'SRE disaster recovery verification restoring a database dump into an ephemeral database and validating Drupal integrity.'
+author: 'Zero'
+
+inputs:
+  backup-file:
+    description: 'Path to database dump file (.sql, .sql.gz, .sql.bz2)'
+    required: true
+  db-host:
+    description: 'Database host (e.g. 127.0.0.1)'
+    required: false
+    default: '127.0.0.1'
+  db-port:
+    description: 'Database port'
+    required: false
+    default: '3306'
+  db-user:
+    description: 'Database username'
+    required: false
+    default: 'root'
+  db-password:
+    description: 'Database password'
+    required: false
+    default: 'root'
+  db-name:
+    description: 'Target database name to create and restore into'
+    required: false
+    default: 'drupal_restore_test'
+  max-restore-time-seconds:
+    description: 'Maximum allowable restore duration in seconds (RTO threshold)'
+    required: false
+    default: '300'
+
+outputs:
+  restore-time-seconds:
+    description: 'Elapsed restoration time in seconds'
+    value: ${{ steps.verify-backup.outputs.restore_time_seconds }}
+  tables-count:
+    description: 'Number of restored database tables'
+    value: ${{ steps.verify-backup.outputs.tables_count }}
+  status:
+    description: 'Restoration status (success/failure)'
+    value: ${{ steps.verify-backup.outputs.status }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Verify backup restoration and database integrity
+      id: verify-backup
+      shell: bash
+      run: |
+        DUMP="${{ inputs.backup-file }}"
+        DB_HOST="${{ inputs.db-host }}"
+        DB_PORT="${{ inputs.db-port }}"
+        DB_USER="${{ inputs.db-user }}"
+        DB_PASS="${{ inputs.db-password }}"
+        DB_NAME="${{ inputs.db-name }}"
+        MAX_TIME="${{ inputs.max-restore-time-seconds }}"
+        SUMMARY_FILE="/tmp/backup_restore_report.md"
+
+        echo "### SRE Backup Restoration and RTO Verification" > "$SUMMARY_FILE"
+        echo "" >> "$SUMMARY_FILE"
+        echo "Source file: \`$DUMP\`" >> "$SUMMARY_FILE"
+        echo "" >> "$SUMMARY_FILE"
+
+        if [ ! -f "$DUMP" ]; then
+          echo "::error::Backup file '$DUMP' does not exist."
+          exit 1
+        fi
+
+        DUMP_SIZE=$(du -h "$DUMP" | awk '{print $1}')
+        echo "Backup file size: $DUMP_SIZE"
+
+        # Check database client availability
+        if ! command -v mysql &>/dev/null; then
+          echo "Installing default-mysql-client..."
+          sudo apt-get update -qq && sudo apt-get install -y -qq default-mysql-client
+        fi
+
+        export MYSQL_PWD="$DB_PASS"
+
+        echo "Creating target database: $DB_NAME..."
+        mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -e "DROP DATABASE IF EXISTS \`$DB_NAME\`; CREATE DATABASE \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+
+        echo "Starting database restoration..."
+        START_TIME=$(date +%s)
+
+        if [[ "$DUMP" == *.gz ]]; then
+          zcat "$DUMP" | mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "$DB_NAME"
+        elif [[ "$DUMP" == *.bz2 ]]; then
+          bzcat "$DUMP" | mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "$DB_NAME"
+        else
+          mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "$DB_NAME" < "$DUMP"
+        fi
+
+        END_TIME=$(date +%s)
+        RESTORE_DURATION=$((END_TIME - START_TIME))
+
+        # Query restored database sanity
+        TABLE_COUNT=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '$DB_NAME';")
+        CONFIG_COUNT=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -N -e "SELECT COUNT(*) FROM \`$DB_NAME\`.config;" 2>/dev/null || echo "0")
+        USERS_COUNT=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -N -e "SELECT COUNT(*) FROM \`$DB_NAME\`.users;" 2>/dev/null || echo "0")
+
+        # Cleanup test DB
+        mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -e "DROP DATABASE IF EXISTS \`$DB_NAME\`;"
+
+        RTO_STATUS="PASS"
+        if [ "$RESTORE_DURATION" -gt "$MAX_TIME" ]; then
+          RTO_STATUS="FAIL (RTO Breached)"
+        fi
+
+        INTEGRITY_STATUS="PASS"
+        if [ "$TABLE_COUNT" -lt 10 ] || [ "$CONFIG_COUNT" -eq 0 ]; then
+          INTEGRITY_STATUS="FAIL (Corrupted or Empty Dump)"
+        fi
+
+        echo "| Metric | Value | Threshold / Expected | Status |" >> "$SUMMARY_FILE"
+        echo "|--------|-------|----------------------|--------|" >> "$SUMMARY_FILE"
+        echo "| Dump Size | \`$DUMP_SIZE\` | - | INFO |" >> "$SUMMARY_FILE"
+        echo "| Restore Duration (RTO) | \`${RESTORE_DURATION}s\` | \`<=${MAX_TIME}s\` | $RTO_STATUS |" >> "$SUMMARY_FILE"
+        echo "| Restored Tables | \`$TABLE_COUNT\` | \`>=10\` | $INTEGRITY_STATUS |" >> "$SUMMARY_FILE"
+        echo "| Config Records | \`$CONFIG_COUNT\` | \`>0\` | $INTEGRITY_STATUS |" >> "$SUMMARY_FILE"
+        echo "| Users Table Count | \`$USERS_COUNT\` | - | INFO |" >> "$SUMMARY_FILE"
+
+        cat "$SUMMARY_FILE" >> "$GITHUB_STEP_SUMMARY"
+
+        echo "restore_time_seconds=$RESTORE_DURATION" >> "$GITHUB_OUTPUT"
+        echo "tables_count=$TABLE_COUNT" >> "$GITHUB_OUTPUT"
+
+        if [ "$INTEGRITY_STATUS" != "PASS" ] || [ "$RTO_STATUS" != "PASS" ]; then
+          echo "status=failure" >> "$GITHUB_OUTPUT"
+          echo "::error::Backup restoration failed integrity or RTO threshold requirements."
+          exit 1
+        else
+          echo "status=success" >> "$GITHUB_OUTPUT"
+          echo "Backup restoration verified successfully."
+        fi

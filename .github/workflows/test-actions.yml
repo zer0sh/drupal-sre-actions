@@ -1,0 +1,66 @@
+name: 'Test Actions CI'
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-code-standards:
+    name: Test Drupal Code Standards Action
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Test drupal-code-standards against fixture folder
+        uses: ./actions/drupal-code-standards
+        with:
+          php-version: '8.2'
+          paths: 'tests/fixtures/sample_module'
+
+  test-runner:
+    name: Test Drupal Test Runner Action
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Test drupal-test-runner against fixture folder
+        uses: ./actions/drupal-test-runner
+        with:
+          php-version: '8.2'
+          test-directory: 'tests/fixtures/sample_module/tests'
+
+  test-secret-scan:
+    name: Test Secret Scan Action
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Run Secret Scan
+        uses: ./actions/secret-scan
+
+  test-synthetic-smoke:
+    name: Test Synthetic Smoke Test Action
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Start local mock server
+        run: |
+          mkdir -p /tmp/mock_web
+          echo '{"status": "ok", "service": "drupal"}' > /tmp/mock_web/healthz
+          php -S 127.0.0.1:8085 -t /tmp/mock_web &
+          sleep 2
+
+      - name: Run Synthetic Smoke Test against local server
+        uses: ./actions/synthetic-smoke-test
+        with:
+          target-url: 'http://127.0.0.1:8085/healthz'
+          expected-status: '200'
+          max-ttfb-ms: '500'
+          json-field-check: 'status == "ok"'

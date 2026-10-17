@@ -1,0 +1,18 @@
+<?php
+
+/**
+ * @file
+ * Primary module hooks for Sample SRE Module.
+ */
+
+declare(strict_types=1);
+
+/**
+ * Implements hook_help().
+ */
+function sample_module_help(string $route_name): string {
+  if ($route_name === 'help.page.sample_module') {
+    return '<p>' . t('Sample module for automated testing.') . '</p>';
+  }
+  return '';
+}

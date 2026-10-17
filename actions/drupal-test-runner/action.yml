@@ -1,0 +1,203 @@
+name: 'Drupal Test Runner by Directory'
+description: 'Executes PHPUnit tests (Unit, Kernel, Functional) targeting a specific test folder or module with SQLite support.'
+author: 'Zero'
+
+inputs:
+  working-directory:
+    description: 'Project root directory'
+    required: false
+    default: '.'
+  php-version:
+    description: 'PHP version to use'
+    required: false
+    default: '8.2'
+  test-directory:
+    description: 'Directory path containing tests to execute'
+    required: true
+  phpunit-binary:
+    description: 'Path to PHPUnit executable'
+    required: false
+    default: 'vendor/bin/phpunit'
+  phpunit-config:
+    description: 'Path to phpunit.xml configuration file'
+    required: false
+    default: ''
+  test-filter:
+    description: 'Optional filter pattern for tests'
+    required: false
+    default: ''
+  db-url:
+    description: 'Database connection string for Kernel and Functional tests'
+    required: false
+    default: 'sqlite://localhost//tmp/drupal_test.sqlite'
+  generate-junit:
+    description: 'Generate JUnit XML report'
+    required: false
+    default: 'true'
+
+outputs:
+  total-tests:
+    description: 'Total number of executed tests'
+    value: ${{ steps.run-tests.outputs.total_tests }}
+  total-assertions:
+    description: 'Total number of assertions'
+    value: ${{ steps.run-tests.outputs.total_assertions }}
+  failures-count:
+    description: 'Number of failed tests'
+    value: ${{ steps.run-tests.outputs.failures_count }}
+  errors-count:
+    description: 'Number of errors'
+    value: ${{ steps.run-tests.outputs.errors_count }}
+  status:
+    description: 'Execution status (success/failure)'
+    value: ${{ steps.run-tests.outputs.status }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up PHP with SQLite and GD
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: ${{ inputs.php-version }}
+        extensions: pdo, pdo_sqlite, gd, simplexml, dom, mbstring
+        tools: composer:v2, phpunit
+        coverage: none
+
+    - name: Locate or bootstrap PHPUnit configuration
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        TARGET_DIR="${{ inputs.test-directory }}"
+        if [ ! -d "$TARGET_DIR" ] && [ ! -f "$TARGET_DIR" ]; then
+          echo "::error::Target test directory or file '$TARGET_DIR' does not exist."
+          exit 1
+        fi
+
+        CONFIG_FILE="${{ inputs.phpunit-config }}"
+        if [ -z "$CONFIG_FILE" ]; then
+          if [ -f "phpunit.xml" ]; then
+            CONFIG_FILE="phpunit.xml"
+          elif [ -f "core/phpunit.xml" ]; then
+            CONFIG_FILE="core/phpunit.xml"
+          elif [ -f "core/phpunit.xml.dist" ]; then
+            CONFIG_FILE="core/phpunit.xml.dist"
+          fi
+        fi
+
+        if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
+          echo "Using existing PHPUnit configuration: $CONFIG_FILE"
+          echo "CONFIG_ARG=-c $CONFIG_FILE" >> "$GITHUB_ENV"
+        else
+          echo "Generating ephemeral phpunit.xml for directory test execution..."
+          cat << 'EOF' > /tmp/ephemeral_phpunit.xml
+        <?xml version="1.0" encoding="UTF-8"?>
+        <phpunit bootstrap="vendor/autoload.php" colors="true" beStrictAboutTestsThatDoNotTestAnything="true">
+          <php>
+            <env name="SIMPLETEST_DB" value="${{ inputs.db-url }}"/>
+            <env name="SIMPLETEST_BASE_URL" value="http://localhost:8080"/>
+            <env name="BROWSERTEST_OUTPUT_DIRECTORY" value="/tmp/browser_output"/>
+          </php>
+        </phpunit>
+        EOF
+          echo "CONFIG_ARG=-c /tmp/ephemeral_phpunit.xml" >> "$GITHUB_ENV"
+        fi
+
+    - name: Execute tests targeting folder
+      id: run-tests
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        SIMPLETEST_DB: ${{ inputs.db-url }}
+      run: |
+        PHPUNIT_BIN="${{ inputs.phpunit-binary }}"
+        if [ ! -x "$PHPUNIT_BIN" ]; then
+          PHPUNIT_BIN="phpunit"
+        fi
+
+        JUNIT_LOG="/tmp/junit_test_report.xml"
+        JUNIT_ARG=""
+        if [ "${{ inputs.generate-junit }}" == "true" ]; then
+          JUNIT_ARG="--log-junit $JUNIT_LOG"
+        fi
+
+        FILTER_ARG=""
+        if [ -n "${{ inputs.test-filter }}" ]; then
+          FILTER_ARG="--filter ${{ inputs.test-filter }}"
+        fi
+
+        TARGET="${{ inputs.test-directory }}"
+        echo "Running PHPUnit targeting folder: $TARGET"
+        echo "Command: $PHPUNIT_BIN $CONFIG_ARG $JUNIT_ARG $FILTER_ARG $TARGET"
+
+        EXIT_CODE=0
+        $PHPUNIT_BIN $CONFIG_ARG $JUNIT_ARG $FILTER_ARG "$TARGET" || EXIT_CODE=$?
+
+        # Process JUnit results
+        SUMMARY_FILE="/tmp/drupal_test_report.md"
+        echo "### Drupal Test Execution Report" > "$SUMMARY_FILE"
+        echo "" >> "$SUMMARY_FILE"
+        echo "Target directory: \`$TARGET\`" >> "$SUMMARY_FILE"
+        echo "" >> "$SUMMARY_FILE"
+
+        python3 -c '
+        import xml.etree.ElementTree as ET
+        import sys, os
+
+        junit_path = "'"$JUNIT_LOG"'"
+        summary_path = "'"$SUMMARY_FILE"'"
+        exit_code = int("'"$EXIT_CODE"'")
+
+        tests = 0
+        assertions = 0
+        failures = 0
+        errors = 0
+        time = "0.0"
+
+        if os.path.exists(junit_path):
+            try:
+                tree = ET.parse(junit_path)
+                root = tree.getroot()
+                # Could be testsuites or single testsuite
+                if root.tag == "testsuite":
+                    tests = int(root.attrib.get("tests", 0))
+                    assertions = int(root.attrib.get("assertions", 0))
+                    failures = int(root.attrib.get("failures", 0))
+                    errors = int(root.attrib.get("errors", 0))
+                    time = root.attrib.get("time", "0.0")
+                else:
+                    for suite in root.findall(".//testsuite"):
+                        tests += int(suite.attrib.get("tests", 0))
+                        assertions += int(suite.attrib.get("assertions", 0))
+                        failures += int(suite.attrib.get("failures", 0))
+                        errors += int(suite.attrib.get("errors", 0))
+            except Exception as e:
+                print(f"Error parsing JUnit: {e}")
+
+        with open(summary_path, "a") as sf:
+            sf.write("| Metric | Value | Status |\n")
+            sf.write("|--------|-------|--------|\n")
+            sf.write(f"| Total Tests | `{tests}` | INFO |\n")
+            sf.write(f"| Total Assertions | `{assertions}` | INFO |\n")
+            sf.write(f"| Failures | `{failures}` | {'FAIL' if failures > 0 else 'PASS'} |\n")
+            sf.write(f"| Errors | `{errors}` | {'FAIL' if errors > 0 else 'PASS'} |\n")
+            sf.write(f"| Duration | `{time}s` | INFO |\n\n")
+
+            if exit_code == 0:
+                sf.write("All tests passed successfully.\n")
+            else:
+                sf.write("**Alert:** One or more tests failed or encountered runtime errors.\n")
+
+        with open("'"$GITHUB_OUTPUT"'", "a") as out:
+            out.write(f"total_tests={tests}\n")
+            out.write(f"total_assertions={assertions}\n")
+            out.write(f"failures_count={failures}\n")
+            out.write(f"errors_count={errors}\n")
+            out.write(f"status={'success' if exit_code == 0 else 'failure'}\n")
+        '
+
+        cat "$SUMMARY_FILE" >> "$GITHUB_STEP_SUMMARY"
+
+        if [ "$EXIT_CODE" -ne 0 ]; then
+          echo "::error::Tests in target folder '$TARGET' failed with exit code $EXIT_CODE."
+          exit $EXIT_CODE
+        fi

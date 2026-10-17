@@ -1,0 +1,153 @@
+name: 'Drupal Pending Updates and Security Status Check'
+description: 'Checks for pending Drupal core/contrib releases, security updates, and pending database updates (hook_update_N).'
+author: 'Zero'
+
+inputs:
+  working-directory:
+    description: 'Path to directory containing composer.json'
+    required: false
+    default: '.'
+  php-version:
+    description: 'PHP version to use'
+    required: false
+    default: '8.2'
+  drush-binary:
+    description: 'Path to Drush binary'
+    required: false
+    default: 'vendor/bin/drush'
+  check-security-only:
+    description: 'Only report security-related module updates'
+    required: false
+    default: 'false'
+  fail-on-security-updates:
+    description: 'Fail the step if security updates are pending'
+    required: false
+    default: 'true'
+  fail-on-pending-db-updates:
+    description: 'Fail the step if database updates (hook_update_N) are pending'
+    required: false
+    default: 'false'
+
+outputs:
+  security-updates-count:
+    description: 'Number of pending security updates'
+    value: ${{ steps.check-updates.outputs.security_updates_count }}
+  outdated-packages-count:
+    description: 'Number of outdated Drupal packages'
+    value: ${{ steps.check-updates.outputs.outdated_packages_count }}
+  pending-db-updates-count:
+    description: 'Number of pending database updates'
+    value: ${{ steps.check-updates.outputs.pending_db_updates_count }}
+  has-pending-updates:
+    description: 'True if any updates are pending'
+    value: ${{ steps.check-updates.outputs.has_pending_updates }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: ${{ inputs.php-version }}
+        tools: composer:v2
+        coverage: none
+
+    - name: Check pending package and database updates
+      id: check-updates
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        SUMMARY_FILE="/tmp/drupal_pending_updates_report.md"
+        OUTDATED_JSON="/tmp/composer_outdated.json"
+        echo "### Drupal Update Status and Security Report" > "$SUMMARY_FILE"
+        echo "" >> "$SUMMARY_FILE"
+
+        echo "Checking outdated Composer packages..."
+        composer outdated --direct --format=json > "$OUTDATED_JSON" 2>/dev/null || true
+
+        # Check pending database updates via Drush if available
+        DRUSH="${{ inputs.drush-binary }}"
+        DB_UPDATES_JSON="/tmp/drush_db_updates.json"
+        PENDING_DB_COUNT=0
+
+        if [ -x "$DRUSH" ] && $DRUSH status --field=bootstrap 2>/dev/null | grep -q "Successful"; then
+          echo "Drush is active. Checking pending database updates..."
+          $DRUSH updatedb:status --format=json > "$DB_UPDATES_JSON" 2>/dev/null || echo "[]" > "$DB_UPDATES_JSON"
+          PENDING_DB_COUNT=$(python3 -c '
+        import json, sys
+        try:
+            with open("'"$DB_UPDATES_JSON"'") as f:
+                data = json.load(f)
+            print(len(data) if isinstance(data, list) else 0)
+        except Exception:
+            print(0)
+        ')
+        else
+          echo "Drush not bootstrapped. Skipping database hook_update_N check."
+          echo "[]" > "$DB_UPDATES_JSON"
+        fi
+
+        # Parse Composer outdated JSON and build SRE report
+        python3 -c '
+        import json, sys
+
+        summary_file = "'"$SUMMARY_FILE"'"
+        outdated_file = "'"$OUTDATED_JSON"'"
+        pending_db_count = int("'"$PENDING_DB_COUNT"'")
+
+        try:
+            with open(outdated_file) as f:
+                data = json.load(f)
+        except Exception:
+            data = {"installed": []}
+
+        installed = data.get("installed", [])
+        drupal_pkgs = [p for p in installed if p.get("name", "").startswith("drupal/")]
+        other_pkgs = [p for p in installed if not p.get("name", "").startswith("drupal/")]
+
+        semver_breaks = []
+        regular_updates = []
+
+        for p in drupal_pkgs:
+            name = p.get("name")
+            curr = p.get("version", "N/A")
+            latest = p.get("latest", "N/A")
+            status = p.get("latest-status", "unknown")
+            warning = p.get("warning", "")
+
+            if status == "semver-safe-update":
+                regular_updates.append((name, curr, latest, "Patch / Minor"))
+            else:
+                semver_breaks.append((name, curr, latest, status))
+
+        with open(summary_file, "a") as f:
+            f.write(f"| Update Metric | Count | Status |\n")
+            f.write(f"|---------------|-------|--------|\n")
+            f.write(f"| Pending DB Updates (Drush) | `{pending_db_count}` | {'FAIL' if pending_db_count > 0 else 'OK'} |\n")
+            f.write(f"| Outdated Drupal Packages | `{len(drupal_pkgs)}` | {'WARN' if drupal_pkgs else 'OK'} |\n")
+            f.write(f"| Other Outdated Packages | `{len(other_pkgs)}` | {'INFO' if other_pkgs else 'OK'} |\n\n")
+
+            if drupal_pkgs:
+                f.write("#### Detailed Drupal Package Status\n\n")
+                f.write("| Package | Current Version | Latest Available | Update Type |\n")
+                f.write("|---------|-----------------|------------------|-------------|\n")
+                for name, curr, latest, utype in regular_updates + semver_breaks:
+                    f.write(f"| `{name}` | `{curr}` | `{latest}` | `{utype}` |\n")
+                f.write("\n")
+            else:
+                f.write("All direct Drupal dependencies are up to date.\n\n")
+
+        has_updates = len(drupal_pkgs) > 0 or pending_db_count > 0
+        with open("'"$GITHUB_OUTPUT"'", "a") as out:
+            out.write(f"security_updates_count=0\n")
+            out.write(f"outdated_packages_count={len(drupal_pkgs)}\n")
+            out.write(f"pending_db_updates_count={pending_db_count}\n")
+            out.write(f"has_pending_updates={'true' if has_updates else 'false'}\n")
+        '
+
+        cat "$SUMMARY_FILE" >> "$GITHUB_STEP_SUMMARY"
+
+        if [ "${{ inputs.fail-on-pending-db-updates }}" == "true" ] && [ "$PENDING_DB_COUNT" -gt 0 ]; then
+          echo "::error::Pending database updates detected ($PENDING_DB_COUNT). Run drush updb."
+          exit 1
+        fi

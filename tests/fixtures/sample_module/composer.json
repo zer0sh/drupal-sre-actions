@@ -1,0 +1,9 @@
+{
+  "name": "drupal/sample_module",
+  "description": "Sample Drupal module for CI fixture testing",
+  "type": "drupal-custom-module",
+  "license": "GPL-2.0-or-later",
+  "require": {
+    "php": ">=8.1"
+  }
+}

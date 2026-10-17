@@ -1,0 +1,3 @@
+enabled: true
+threshold_ms: 500
+alert_email: sre-alerts@example.com

@@ -1,0 +1,18 @@
+{#
+/**
+ * @file
+ * Default theme implementation for a sample block.
+ *
+ * Available variables:
+ * - title: The block title.
+ * - content: The block content.
+ */
+#}
+<div class="sample-block">
+  {% if title %}
+    <h2 class="sample-block__title">{{ title }}</h2>
+  {% endif %}
+  <div class="sample-block__content">
+    {{ content }}
+  </div>
+</div>

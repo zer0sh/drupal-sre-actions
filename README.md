@@ -1,6 +1,6 @@
 # Drupal SRE Actions
 
-A curated collection of production-grade GitHub Composite Actions and Reusable Workflows tailored for Drupal platform engineering, Site Reliability Engineering (SRE), continuous patching, and automated quality gates.
+A curated collection of production-grade GitHub Composite Actions and Reusable Workflows tailored for Drupal platform engineering, Site Reliability Engineering (SRE), continuous patching, test execution by directory, and automated quality gates.
 
 ---
 
@@ -9,34 +9,124 @@ A curated collection of production-grade GitHub Composite Actions and Reusable W
 This repository provides reusable components adhering to the following SRE operational pillars:
 
 1. **Continuous Automated Patching:** Safe, unattended core and module updates with changelog generation and PR automation.
-2. **Shift-Left Quality & Linting:** Strict adherence to Drupal and DrupalPractice standards, Twig syntax checks, and YAML validation.
-3. **Drift Detection:** Verification of configuration synchronization between active database states and version-controlled sync directories (`config/sync`).
-4. **Security & Vulnerability Gates:** Automated CVE advisory scanning (`composer audit`) and zero-tolerance secret leakage detection.
-5. **Runtime Observability & Smoke Testing:** Synthetic availability probes enforcing TTFB latency SLOs and TLS certificate expiry thresholds.
+2. **Pending Updates & Security Status:** Proactive detection of outdated releases, security advisories, and pending database updates (`hook_update_N`).
+3. **Directory-Based Automated Testing:** Targeted PHPUnit test executions (Unit, Kernel, Functional) directed at any module or folder with ephemeral SQLite configuration.
+4. **Shift-Left Quality & Linting:** Strict adherence to Drupal and DrupalPractice standards, Twig syntax checks, and YAML validation.
+5. **Drift Detection:** Verification of configuration synchronization between active database states and version-controlled sync directories (`config/sync`).
+6. **Disaster Recovery & Backup Validation:** Automated restoration of SQL dumps into ephemeral databases measuring RTO thresholds and schema health.
+7. **Security & Vulnerability Gates:** Automated CVE advisory scanning (`composer audit`) and zero-tolerance secret leakage detection.
+8. **Runtime Observability & Smoke Testing:** Synthetic availability probes enforcing TTFB latency SLOs and TLS certificate expiry thresholds.
 
 ```text
 drupal-sre-actions/
 ├── actions/
-│   ├── drupal-composer-update/      # Composer update automation & PR generation
-│   ├── drupal-code-standards/       # PHPCS (Drupal/DrupalPractice), Twig & YAML
-│   ├── drupal-static-analysis/      # PHPStan with phpstan-drupal extensions
-│   ├── drupal-config-drift/         # Configuration sync & database drift checks
-│   ├── drupal-db-sanity-check/      # Ephemeral update & schema verification
-│   ├── composer-security-audit/     # Advisory check (CVE) & abandoned package audit
-│   ├── synthetic-smoke-test/        # SRE latency SLO & healthcheck synthetic probe
-│   └── secret-scan/                 # Gitleaks / regex secret scanner
+│   ├── drupal-composer-update/         # Composer update automation & PR generation
+│   ├── drupal-update-status-check/     # Detects pending core/contrib & DB updates
+│   ├── drupal-test-runner/             # Runs PHPUnit targeted at a specific folder
+│   ├── drupal-backup-verification/     # Ephemeral SQL dump restoration & RTO check
+│   ├── drupal-code-standards/          # PHPCS (Drupal/DrupalPractice), Twig & YAML
+│   ├── drupal-static-analysis/         # PHPStan with phpstan-drupal extensions
+│   ├── drupal-config-drift/            # Configuration sync & database drift checks
+│   ├── drupal-db-sanity-check/         # Ephemeral update & schema verification
+│   ├── composer-security-audit/        # Advisory check (CVE) & abandoned package audit
+│   ├── synthetic-smoke-test/           # SRE latency SLO & healthcheck synthetic probe
+│   └── secret-scan/                    # Gitleaks / regex secret scanner
+├── tests/
+│   └── fixtures/
+│       └── sample_module/              # Mock Drupal module with Unit tests & templates
 └── .github/
     └── workflows/
-        ├── reusable-drupal-ci.yml     # Complete CI pipeline
-        ├── reusable-drupal-update.yml # Scheduled/dispatched update pipeline
-        └── reusable-smoke-test.yml    # Post-deployment synthetic validation
+        ├── test-actions.yml            # Self-testing CI executing actions on fixtures
+        ├── reusable-drupal-ci.yml      # Complete CI pipeline
+        ├── reusable-drupal-update.yml  # Scheduled/dispatched update pipeline
+        └── reusable-smoke-test.yml     # Post-deployment synthetic validation
 ```
 
 ---
 
 ## Actions Catalog
 
-### 1. `drupal-composer-update`
+### 1. `drupal-update-status-check`
+
+Checks for pending Drupal core/contrib releases, available security updates, and unapplied database updates (`hook_update_N` / `post_update`).
+
+#### Inputs
+
+| Name | Description | Default | Required |
+|------|-------------|---------|----------|
+| `working-directory` | Path containing `composer.json` | `.` | No |
+| `php-version` | PHP runtime version | `8.2` | No |
+| `drush-binary` | Path to Drush executable | `vendor/bin/drush` | No |
+| `fail-on-security-updates` | Fail step if security updates exist | `true` | No |
+| `fail-on-pending-db-updates` | Fail step if unapplied DB updates exist | `false` | No |
+
+#### Outputs
+
+| Name | Description |
+|------|-------------|
+| `security-updates-count` | Number of pending security updates |
+| `outdated-packages-count` | Number of outdated direct Drupal packages |
+| `pending-db-updates-count` | Number of pending database migrations |
+| `has-pending-updates` | `true` if any package or schema updates are pending |
+
+---
+
+### 2. `drupal-test-runner`
+
+Executes PHPUnit tests targeting any arbitrary folder or custom module path. Automatically handles in-memory SQLite database setups for Kernel and Functional tests without requiring an external MySQL container.
+
+#### Inputs
+
+| Name | Description | Default | Required |
+|------|-------------|---------|----------|
+| `test-directory` | Directory path containing tests to execute | - | Yes |
+| `working-directory` | Project root directory | `.` | No |
+| `php-version` | PHP runtime version | `8.2` | No |
+| `phpunit-binary` | Path to PHPUnit executable | `vendor/bin/phpunit` | No |
+| `phpunit-config` | Custom `phpunit.xml` path (auto-generated if omitted) | `""` | No |
+| `test-filter` | Filter pattern for tests | `""` | No |
+| `db-url` | Database connection string | `sqlite://localhost//tmp/drupal_test.sqlite` | No |
+| `generate-junit` | Generate JUnit XML report | `true` | No |
+
+#### Outputs
+
+| Name | Description |
+|------|-------------|
+| `total-tests` | Total number of executed tests |
+| `total-assertions` | Total number of assertions verified |
+| `failures-count` | Number of failed tests |
+| `errors-count` | Number of runtime test errors |
+| `status` | `success` or `failure` |
+
+---
+
+### 3. `drupal-backup-verification`
+
+SRE disaster recovery verification: loads an SQL backup dump into an ephemeral database, calculates restoration duration against Recovery Time Objectives (RTO), and verifies schema integrity.
+
+#### Inputs
+
+| Name | Description | Default | Required |
+|------|-------------|---------|----------|
+| `backup-file` | Path to SQL dump (`.sql`, `.sql.gz`, `.sql.bz2`) | - | Yes |
+| `db-host` | Database host | `127.0.0.1` | No |
+| `db-port` | Database port | `3306` | No |
+| `db-user` | Database user | `root` | No |
+| `db-password` | Database password | `root` | No |
+| `db-name` | Target test database name | `drupal_restore_test` | No |
+| `max-restore-time-seconds` | Maximum allowed restore duration (RTO limit) | `300` | No |
+
+#### Outputs
+
+| Name | Description |
+|------|-------------|
+| `restore-time-seconds` | Elapsed restoration time in seconds |
+| `tables-count` | Count of restored database tables |
+| `status` | `success` or `failure` |
+
+---
+
+### 4. `drupal-composer-update`
 
 Automates updates for Drupal core and contributed modules, produces a formatted Markdown comparison table of updated packages, and opens/updates a Pull Request.
 
@@ -54,17 +144,9 @@ Automates updates for Drupal core and contributed modules, produces a formatted 
 | `pr-title` | Pull request title | `chore(deps): automated Drupal updates` | No |
 | `github-token` | GitHub token with write permissions | `${{ github.token }}` | No |
 
-#### Outputs
-
-| Name | Description |
-|------|-------------|
-| `has-updates` | `true` if `composer.lock` was modified |
-| `updated-packages` | Markdown table of updated packages and version diffs |
-| `pr-url` | URL of the created or updated PR |
-
 ---
 
-### 2. `drupal-code-standards`
+### 5. `drupal-code-standards`
 
 Enforces coding standards across custom modules and themes using PHP_CodeSniffer with Drupal Coder standards, Twig syntax checks, and YAML validation.
 
@@ -83,7 +165,7 @@ Enforces coding standards across custom modules and themes using PHP_CodeSniffer
 
 ---
 
-### 3. `drupal-config-drift`
+### 6. `drupal-config-drift`
 
 Detects configuration drift between the active Drupal database state and the export directory (`config/sync`), preventing accidental configuration loss during deployments.
 
@@ -97,79 +179,33 @@ Detects configuration drift between the active Drupal database state and the exp
 | `sync-directory` | Path to sync directory | `config/sync` | No |
 | `fail-on-drift` | Fail execution if discrepancies exist | `true` | No |
 
-#### Outputs
-
-| Name | Description |
-|------|-------------|
-| `drift-detected` | `true` if discrepancies exist |
-| `diff-summary` | Summary of drifted configuration files |
-
 ---
 
-### 4. `drupal-static-analysis`
+### 7. `drupal-static-analysis`
 
 Executes PHPStan configured with `mglaman/phpstan-drupal` to identify deprecated API calls, invalid function arguments, and breaking typing bugs prior to merges.
 
-#### Inputs
-
-| Name | Description | Default | Required |
-|------|-------------|---------|----------|
-| `working-directory` | Working directory path | `.` | No |
-| `php-version` | PHP runtime version | `8.2` | No |
-| `paths` | Paths to analyze | `web/modules/custom` | No |
-| `level` | PHPStan rule level (0 to 9) | `1` | No |
-| `memory-limit` | Memory limit | `1G` | No |
-| `config-file` | Optional path to `phpstan.neon` | `""` | No |
-
 ---
 
-### 5. `drupal-db-sanity-check`
+### 8. `drupal-db-sanity-check`
 
 Runs dry-run simulations of pending database migrations (`drush updatedb`) and checks entity schema definitions for mismatches.
 
-#### Inputs
-
-| Name | Description | Default | Required |
-|------|-------------|---------|----------|
-| `working-directory` | Drupal root directory | `.` | No |
-| `drush-binary` | Path to Drush binary | `vendor/bin/drush` | No |
-| `fail-on-pending-updates`| Fail if pending `hook_update_N` exist | `false` | No |
-| `fail-on-schema-mismatch`| Fail if entity definitions mismatch | `true` | No |
-
 ---
 
-### 6. `composer-security-audit`
+### 9. `composer-security-audit`
 
 Scans dependencies against official security advisory databases (CVE feeds and Drupal Security Advisories).
 
-#### Inputs
-
-| Name | Description | Default | Required |
-|------|-------------|---------|----------|
-| `working-directory` | Path containing `composer.json` | `.` | No |
-| `fail-on-vulnerability` | Fail job on active CVE detection | `true` | No |
-| `abandoned` | Policy for abandoned packages (`fail`, `report`, `ignore`) | `report` | No |
-
 ---
 
-### 7. `synthetic-smoke-test`
+### 10. `synthetic-smoke-test`
 
 Performs SRE synthetic probes evaluating HTTP response status, TTFB latency SLOs, TLS certificate expiration dates, and payload assertion.
 
-#### Inputs
-
-| Name | Description | Default | Required |
-|------|-------------|---------|----------|
-| `target-url` | Endpoint URL to probe | - | Yes |
-| `expected-status` | Expected HTTP status code | `200` | No |
-| `max-ttfb-ms` | Maximum acceptable TTFB in ms | `800` | No |
-| `ssl-min-days` | Minimum remaining days for TLS validity | `14` | No |
-| `json-field-check` | Python expression verifying payload | `""` | No |
-| `retries` | Number of probe retries | `3` | No |
-
 ---
 
-### 8. `secret-scan`
+### 11. `secret-scan`
 
 Scans repositories for leaked API keys, database credentials, salts, and private keys using Gitleaks and fallback regex patterns.
 
@@ -200,6 +236,28 @@ jobs:
       enable-config-drift: true
 ```
 
+### Targeted Folder Test Runner Workflow
+
+Execute unit/functional tests on a specific custom module:
+
+```yaml
+name: Module Tests
+
+on: [push, pull_request]
+
+jobs:
+  test-module:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Tests in Specific Folder
+        uses: zero-sh/drupal-sre-actions/actions/drupal-test-runner@main
+        with:
+          php-version: '8.3'
+          test-directory: 'web/modules/custom/my_module/tests'
+```
+
 ### Scheduled Dependency Updates
 
 Add the following to `.github/workflows/scheduled-updates.yml`:
@@ -220,28 +278,6 @@ jobs:
       packages: 'drupal/core-*'
     secrets:
       token: ${{ secrets.PAT_GITHUB_TOKEN }}
-```
-
-### Post-Deployment Smoke Test
-
-Add the following to `.github/workflows/post-deploy.yml`:
-
-```yaml
-name: Post-Deployment Smoke Verification
-
-on:
-  deployment_status:
-    states: [success]
-
-jobs:
-  health-check:
-    uses: zero-sh/drupal-sre-actions/.github/workflows/reusable-smoke-test.yml@main
-    with:
-      target-url: 'https://drupal.example.com/healthz'
-      expected-status: '200'
-      max-ttfb-ms: '500'
-      ssl-min-days: '21'
-      json-field-check: 'status == "healthy"'
 ```
 
 ---

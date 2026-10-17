@@ -1,0 +1,6 @@
+name: 'Sample SRE Module'
+type: module
+description: 'Demonstration module for Drupal SRE GitHub Actions testing.'
+core_version_requirement: ^10 || ^11
+package: Custom
+version: 1.0.0
