@@ -1,0 +1,92 @@
+name: 'Reusable Semantic Release'
+
+on:
+  workflow_call:
+    inputs:
+      bump:
+        description: 'Version bump type: auto, patch, minor, major, or explicit version'
+        required: false
+        default: 'auto'
+        type: string
+      tag-prefix:
+        description: 'Prefix for tags (default: v)'
+        required: false
+        default: 'v'
+        type: string
+      initial-version:
+        description: 'First version if no tags exist'
+        required: false
+        default: '1.0.0'
+        type: string
+      update-major-tag:
+        description: 'Update floating major tag (e.g. v1)'
+        required: false
+        default: true
+        type: boolean
+      create-release:
+        description: 'Create GitHub Release with notes'
+        required: false
+        default: true
+        type: boolean
+      draft:
+        description: 'Whether release is draft'
+        required: false
+        default: false
+        type: boolean
+      prerelease:
+        description: 'Whether release is prerelease'
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      token:
+        description: 'GitHub token with contents:write permission'
+        required: false
+    outputs:
+      version:
+        description: 'Version number released'
+        value: ${{ jobs.release.outputs.version }}
+      tag:
+        description: 'Full tag created'
+        value: ${{ jobs.release.outputs.tag }}
+      major-tag:
+        description: 'Floating major tag updated'
+        value: ${{ jobs.release.outputs.major-tag }}
+      has-bump:
+        description: 'Whether a version was bumped'
+        value: ${{ jobs.release.outputs.has-bump }}
+      release-url:
+        description: 'URL of the published release'
+        value: ${{ jobs.release.outputs.release-url }}
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Semantic Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.sr.outputs.version }}
+      tag: ${{ steps.sr.outputs.tag }}
+      major-tag: ${{ steps.sr.outputs.major-tag }}
+      has-bump: ${{ steps.sr.outputs.has-bump }}
+      release-url: ${{ steps.sr.outputs.release-url }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Execute Semantic Release Action
+        id: sr
+        uses: zer0sh/drupal-sre-actions/actions/semantic-release@main
+        with:
+          bump: ${{ inputs.bump }}
+          tag-prefix: ${{ inputs.tag-prefix }}
+          initial-version: ${{ inputs.initial-version }}
+          update-major-tag: ${{ inputs.update-major-tag }}
+          create-release: ${{ inputs.create-release }}
+          draft: ${{ inputs.draft }}
+          prerelease: ${{ inputs.prerelease }}
+          github-token: ${{ secrets.token || secrets.GITHUB_TOKEN }}

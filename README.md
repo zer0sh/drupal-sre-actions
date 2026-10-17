@@ -30,16 +30,19 @@ drupal-sre-actions/
 │   ├── drupal-db-sanity-check/         # Ephemeral update & schema verification
 │   ├── composer-security-audit/        # Advisory check (CVE) & abandoned package audit
 │   ├── synthetic-smoke-test/           # SRE latency SLO & healthcheck synthetic probe
-│   └── secret-scan/                    # Gitleaks / regex secret scanner
+│   ├── secret-scan/                    # Gitleaks / regex secret scanner
+│   └── semantic-release/               # SemVer bump, git tagging & GitHub Release
 ├── tests/
 │   └── fixtures/
 │       └── sample_module/              # Mock Drupal module with Unit tests & templates
 └── .github/
     └── workflows/
         ├── test-actions.yml            # Self-testing CI executing actions on fixtures
+        ├── release.yml                 # Semantic release workflow
         ├── reusable-drupal-ci.yml      # Complete CI pipeline
         ├── reusable-drupal-update.yml  # Scheduled/dispatched update pipeline
-        └── reusable-smoke-test.yml     # Post-deployment synthetic validation
+        ├── reusable-smoke-test.yml     # Post-deployment synthetic validation
+        └── reusable-semantic-release.yml # Reusable tagging and release workflow
 ```
 
 ---
@@ -211,6 +214,39 @@ Scans repositories for leaked API keys, database credentials, salts, and private
 
 ---
 
+### 12. `semantic-release`
+
+Calculates semantic versions from Conventional Commits, generates structured Markdown release notes grouped by type, pushes annotated git tags, maintains floating major tags (e.g. `v1`), and publishes GitHub Releases via GitHub CLI.
+
+#### Inputs
+
+| Name | Description | Default | Required |
+|------|-------------|---------|----------|
+| `bump` | Bump strategy: `auto` (Conventional Commits), `patch`, `minor`, `major`, or explicit semver | `auto` | No |
+| `tag-prefix` | Prefix for git tags | `v` | No |
+| `initial-version` | Initial version when no tags exist | `1.0.0` | No |
+| `update-major-tag` | Whether to maintain a floating major tag (e.g. `v1`) | `true` | No |
+| `create-release` | Whether to publish a GitHub Release | `true` | No |
+| `draft` | Whether the created GitHub Release is marked as draft | `false` | No |
+| `prerelease` | Whether the created GitHub Release is marked as prerelease | `false` | No |
+| `github-token` | GitHub token with `contents: write` permission | `${{ github.token }}` | No |
+
+#### Outputs
+
+| Name | Description |
+|------|-------------|
+| `version` | Calculated version string (e.g. `1.1.0`) |
+| `tag` | Full tag name (e.g. `v1.1.0`) |
+| `major-tag` | Floating major tag name (e.g. `v1`) |
+| `previous-version` | Previous version string |
+| `previous-tag` | Previous git tag name |
+| `bump-type` | Applied bump type (`major`, `minor`, `patch`, `initial`, `explicit`, `none`) |
+| `has-bump` | `true` if a new version was bumped |
+| `release-url` | URL of published GitHub Release |
+| `changelog-path` | Filepath to generated Markdown changelog |
+
+---
+
 ## Reusable Workflows Usage
 
 ### Pull Request CI Workflow
@@ -280,8 +316,38 @@ jobs:
       token: ${{ secrets.PAT_GITHUB_TOKEN }}
 ```
 
+### Automated Semantic Release & Tagging
+
+Add the following to `.github/workflows/release.yml` to automatically release on push or manual trigger:
+
+```yaml
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump strategy (auto, patch, minor, major, or version)'
+        required: false
+        default: 'auto'
+        type: string
+
+jobs:
+  release:
+    uses: zer0sh/drupal-sre-actions/.github/workflows/reusable-semantic-release.yml@main
+    with:
+      bump: ${{ inputs.bump || 'auto' }}
+      update-major-tag: true
+      create-release: true
+    secrets:
+      token: ${{ secrets.GITHUB_TOKEN }}
+```
+
 ---
 
 ## License
 
 This project is licensed under the terms of the [MIT License](LICENSE).
+

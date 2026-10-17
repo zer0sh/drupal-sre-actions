@@ -64,3 +64,20 @@ jobs:
           expected-status: '200'
           max-ttfb-ms: '500'
           json-field-check: 'status == "ok"'
+
+  test-semantic-release:
+    name: Test Semantic Release Action
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Test semver and changelog calculation
+        run: |
+          python3 actions/semantic-release/semver.py auto v 1.0.0
+          python3 actions/semantic-release/changelog.py 1.0.0 v1.0.0 "" /tmp/test_changelog.md
+          test -s /tmp/test_changelog.md
+          echo "Semantic release verification passed."
+

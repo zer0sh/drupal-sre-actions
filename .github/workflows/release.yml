@@ -1,0 +1,35 @@
+name: 'Release'
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump strategy (auto, patch, minor, major, or explicit semver)'
+        required: true
+        default: 'auto'
+        type: choice
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Semantic Release & Tagging
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Semantic Release
+        id: release
+        uses: ./actions/semantic-release
+        with:
+          bump: ${{ inputs.bump }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,169 @@
+name: 'Semantic Versioning, Tag & Release'
+description: 'Calculates SemVer from Conventional Commits, generates structured changelogs, pushes git tags, and creates GitHub Releases.'
+author: 'Zero'
+
+inputs:
+  bump:
+    description: 'Version bump strategy: auto (Conventional Commits), patch, minor, major, or explicit semver (e.g. 1.2.3)'
+    required: false
+    default: 'auto'
+  tag-prefix:
+    description: 'Prefix for git tags (e.g. v)'
+    required: false
+    default: 'v'
+  initial-version:
+    description: 'First version if no git tags exist'
+    required: false
+    default: '1.0.0'
+  update-major-tag:
+    description: 'Whether to maintain a floating major tag (e.g. v1 pointing to v1.2.3)'
+    required: false
+    default: 'true'
+  create-release:
+    description: 'Whether to create a GitHub Release'
+    required: false
+    default: 'true'
+  draft:
+    description: 'Whether the created GitHub Release is a draft'
+    required: false
+    default: 'false'
+  prerelease:
+    description: 'Whether the created GitHub Release is marked as prerelease'
+    required: false
+    default: 'false'
+  github-token:
+    description: 'GitHub token with contents:write permission'
+    required: false
+    default: ${{ github.token }}
+  git-user-name:
+    description: 'Git committer name'
+    required: false
+    default: 'github-actions[bot]'
+  git-user-email:
+    description: 'Git committer email'
+    required: false
+    default: 'github-actions[bot]@users.noreply.github.com'
+
+outputs:
+  version:
+    description: 'Calculated version number (e.g. 1.0.0)'
+    value: ${{ steps.semver.outputs.version }}
+  tag:
+    description: 'Full git tag name (e.g. v1.0.0)'
+    value: ${{ steps.semver.outputs.tag }}
+  major-tag:
+    description: 'Floating major git tag (e.g. v1)'
+    value: ${{ steps.semver.outputs.major_tag }}
+  previous-version:
+    description: 'Previous version number'
+    value: ${{ steps.semver.outputs.previous_version }}
+  previous-tag:
+    description: 'Previous git tag'
+    value: ${{ steps.semver.outputs.previous_tag }}
+  bump-type:
+    description: 'Applied bump type (major, minor, patch, initial, explicit, none)'
+    value: ${{ steps.semver.outputs.bump_type }}
+  has-bump:
+    description: 'True if a new version was bumped'
+    value: ${{ steps.semver.outputs.has_bump }}
+  release-url:
+    description: 'URL of the published GitHub Release'
+    value: ${{ steps.publish.outputs.release_url }}
+  changelog-path:
+    description: 'Path to the generated Markdown changelog file'
+    value: /tmp/release_changelog.md
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Ensure Git tags and history are available
+      shell: bash
+      run: |
+        git fetch --tags --prune --unshallow 2>/dev/null || git fetch --tags --prune 2>/dev/null || true
+
+    - name: Compute semantic version
+      id: semver
+      shell: bash
+      env:
+        BUMP_INPUT: ${{ inputs.bump }}
+        TAG_PREFIX: ${{ inputs.tag-prefix }}
+        INITIAL_VERSION: ${{ inputs.initial-version }}
+      run: |
+        python3 "${{ github.action_path }}/semver.py" "$BUMP_INPUT" "$TAG_PREFIX" "$INITIAL_VERSION"
+
+    - name: Generate structured changelog
+      id: changelog
+      shell: bash
+      env:
+        VERSION: ${{ steps.semver.outputs.version }}
+        TAG: ${{ steps.semver.outputs.tag }}
+        PREV_TAG: ${{ steps.semver.outputs.previous_tag }}
+      run: |
+        CHANGELOG_FILE="/tmp/release_changelog.md"
+        python3 "${{ github.action_path }}/changelog.py" "$VERSION" "$TAG" "$PREV_TAG" "$CHANGELOG_FILE"
+        cat "$CHANGELOG_FILE" >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Publish Git tag and GitHub Release
+      id: publish
+      shell: bash
+      env:
+        HAS_BUMP: ${{ steps.semver.outputs.has_bump }}
+        TAG: ${{ steps.semver.outputs.tag }}
+        MAJOR_TAG: ${{ steps.semver.outputs.major_tag }}
+        UPDATE_MAJOR_TAG: ${{ inputs.update-major-tag }}
+        CREATE_RELEASE: ${{ inputs.create-release }}
+        IS_DRAFT: ${{ inputs.draft }}
+        IS_PRERELEASE: ${{ inputs.prerelease }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        GIT_NAME: ${{ inputs.git-user-name }}
+        GIT_EMAIL: ${{ inputs.git-user-email }}
+        CHANGELOG_FILE: /tmp/release_changelog.md
+      run: |
+        if [ "$HAS_BUMP" != "true" ]; then
+          echo "No version bump required. Skipping tag and release creation."
+          echo "release_url=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "Configuring git user credentials..."
+        git config user.name "$GIT_NAME"
+        git config user.email "$GIT_EMAIL"
+
+        if [ -n "$GITHUB_TOKEN" ] && [ -n "$GITHUB_REPOSITORY" ]; then
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+        fi
+
+        echo "Creating tag $TAG..."
+        git tag -a "$TAG" -m "Release $TAG"
+
+        if [ "$UPDATE_MAJOR_TAG" == "true" ] && [ -n "$MAJOR_TAG" ]; then
+          echo "Updating floating major tag $MAJOR_TAG..."
+          git tag -fa "$MAJOR_TAG" -m "Release $MAJOR_TAG"
+        fi
+
+        echo "Pushing tags to origin..."
+        git push origin "$TAG"
+        if [ "$UPDATE_MAJOR_TAG" == "true" ] && [ -n "$MAJOR_TAG" ]; then
+          git push origin "$MAJOR_TAG" --force
+        fi
+
+        RELEASE_URL=""
+        if [ "$CREATE_RELEASE" == "true" ]; then
+          echo "Creating GitHub Release for $TAG..."
+          EXTRA_FLAGS=()
+          if [ "$IS_DRAFT" == "true" ]; then
+            EXTRA_FLAGS+=("--draft")
+          fi
+          if [ "$IS_PRERELEASE" == "true" ]; then
+            EXTRA_FLAGS+=("--prerelease")
+          fi
+
+          RELEASE_URL=$(gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file "$CHANGELOG_FILE" \
+            "${EXTRA_FLAGS[@]}" || echo "")
+
+          echo "GitHub Release published: $RELEASE_URL"
+        fi
+
+        echo "release_url=$RELEASE_URL" >> "$GITHUB_OUTPUT"
