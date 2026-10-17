@@ -89,61 +89,66 @@ runs:
 
         # Parse Composer outdated JSON and build SRE report
         python3 -c '
-        import json, sys
+          import json, sys
 
-        summary_file = "'"$SUMMARY_FILE"'"
-        outdated_file = "'"$OUTDATED_JSON"'"
-        pending_db_count = int("'"$PENDING_DB_COUNT"'")
+          summary_file = sys.argv[1]
+          outdated_file = sys.argv[2]
+          pending_db_count = int(sys.argv[3])
+          gh_output = sys.argv[4]
 
-        try:
-            with open(outdated_file) as f:
-                data = json.load(f)
-        except Exception:
-            data = {"installed": []}
+          try:
+              with open(outdated_file) as f:
+                  data = json.load(f)
+          except Exception:
+              data = {"installed": []}
 
-        installed = data.get("installed", [])
-        drupal_pkgs = [p for p in installed if p.get("name", "").startswith("drupal/")]
-        other_pkgs = [p for p in installed if not p.get("name", "").startswith("drupal/")]
+          installed = data.get("installed", [])
+          drupal_pkgs = [p for p in installed if p.get("name", "").startswith("drupal/")]
+          other_pkgs = [p for p in installed if not p.get("name", "").startswith("drupal/")]
 
-        semver_breaks = []
-        regular_updates = []
+          semver_breaks = []
+          regular_updates = []
 
-        for p in drupal_pkgs:
-            name = p.get("name")
-            curr = p.get("version", "N/A")
-            latest = p.get("latest", "N/A")
-            status = p.get("latest-status", "unknown")
-            warning = p.get("warning", "")
+          for p in drupal_pkgs:
+              name = p.get("name")
+              curr = p.get("version", "N/A")
+              latest = p.get("latest", "N/A")
+              status = p.get("latest-status", "unknown")
+              warning = p.get("warning", "")
 
-            if status == "semver-safe-update":
-                regular_updates.append((name, curr, latest, "Patch / Minor"))
-            else:
-                semver_breaks.append((name, curr, latest, status))
+              if status == "semver-safe-update":
+                  regular_updates.append((name, curr, latest, "Patch / Minor"))
+              else:
+                  semver_breaks.append((name, curr, latest, status))
 
-        with open(summary_file, "a") as f:
-            f.write(f"| Update Metric | Count | Status |\n")
-            f.write(f"|---------------|-------|--------|\n")
-            f.write(f"| Pending DB Updates (Drush) | `{pending_db_count}` | {'FAIL' if pending_db_count > 0 else 'OK'} |\n")
-            f.write(f"| Outdated Drupal Packages | `{len(drupal_pkgs)}` | {'WARN' if drupal_pkgs else 'OK'} |\n")
-            f.write(f"| Other Outdated Packages | `{len(other_pkgs)}` | {'INFO' if other_pkgs else 'OK'} |\n\n")
+          db_status = "FAIL" if pending_db_count > 0 else "OK"
+          drupal_status = "WARN" if drupal_pkgs else "OK"
+          other_status = "INFO" if other_pkgs else "OK"
 
-            if drupal_pkgs:
-                f.write("#### Detailed Drupal Package Status\n\n")
-                f.write("| Package | Current Version | Latest Available | Update Type |\n")
-                f.write("|---------|-----------------|------------------|-------------|\n")
-                for name, curr, latest, utype in regular_updates + semver_breaks:
-                    f.write(f"| `{name}` | `{curr}` | `{latest}` | `{utype}` |\n")
-                f.write("\n")
-            else:
-                f.write("All direct Drupal dependencies are up to date.\n\n")
+          with open(summary_file, "a") as f:
+              f.write("| Update Metric | Count | Status |\n")
+              f.write("|---------------|-------|--------|\n")
+              f.write(f"| Pending DB Updates (Drush) | `{pending_db_count}` | {db_status} |\n")
+              f.write(f"| Outdated Drupal Packages | `{len(drupal_pkgs)}` | {drupal_status} |\n")
+              f.write(f"| Other Outdated Packages | `{len(other_pkgs)}` | {other_status} |\n\n")
 
-        has_updates = len(drupal_pkgs) > 0 or pending_db_count > 0
-        with open("'"$GITHUB_OUTPUT"'", "a") as out:
-            out.write(f"security_updates_count=0\n")
-            out.write(f"outdated_packages_count={len(drupal_pkgs)}\n")
-            out.write(f"pending_db_updates_count={pending_db_count}\n")
-            out.write(f"has_pending_updates={'true' if has_updates else 'false'}\n")
-        '
+              if drupal_pkgs:
+                  f.write("#### Detailed Drupal Package Status\n\n")
+                  f.write("| Package | Current Version | Latest Available | Update Type |\n")
+                  f.write("|---------|-----------------|------------------|-------------|\n")
+                  for name, curr, latest, utype in regular_updates + semver_breaks:
+                      f.write(f"| `{name}` | `{curr}` | `{latest}` | `{utype}` |\n")
+                  f.write("\n")
+              else:
+                  f.write("All direct Drupal dependencies are up to date.\n\n")
+
+          has_updates = "true" if (len(drupal_pkgs) > 0 or pending_db_count > 0) else "false"
+          with open(gh_output, "a") as out:
+              out.write("security_updates_count=0\n")
+              out.write(f"outdated_packages_count={len(drupal_pkgs)}\n")
+              out.write(f"pending_db_updates_count={pending_db_count}\n")
+              out.write(f"has_pending_updates={has_updates}\n")
+          ' "$SUMMARY_FILE" "$OUTDATED_JSON" "$PENDING_DB_COUNT" "$GITHUB_OUTPUT"
 
         cat "$SUMMARY_FILE" >> "$GITHUB_STEP_SUMMARY"
 

@@ -44,73 +44,79 @@ runs:
           /tmp/gitleaks detect --source=. --no-git --report-path="$REPORT_FILE" --report-format=json --exit-code=0 || true
 
           python3 -c '
-        import json, sys
+          import json, sys
 
-        summary = "'"$SUMMARY_FILE"'"
-        report = "'"$REPORT_FILE"'"
+          summary = sys.argv[1]
+          report = sys.argv[2]
+          gh_output = sys.argv[3]
 
-        try:
-            with open(report, "r") as f:
-                data = json.load(f)
-        except Exception:
-            data = []
+          try:
+              with open(report, "r") as f:
+                  data = json.load(f)
+          except Exception:
+              data = []
 
-        with open(summary, "a") as sf:
-            if data:
-                sf.write(f"**Alert:** Found {len(data)} potential secret(s) or exposed token(s).\n\n")
-                sf.write("| Rule | File | Secret Hash / Snippet |\n")
-                sf.write("|------|------|------------------------|\n")
-                for item in data:
-                    rule = item.get("RuleID", "Unknown")
-                    file = item.get("File", "")
-                    secret = item.get("Secret", "")
-                    redacted = secret[:4] + "****" if len(secret) > 4 else "****"
-                    sf.write(f"| `{rule}` | `{file}` | `{redacted}` |\n")
-            else:
-                sf.write("No hardcoded secrets or credentials detected.\n")
+          with open(summary, "a") as sf:
+              if data:
+                  sf.write(f"**Alert:** Found {len(data)} potential secret(s) or exposed token(s).\n\n")
+                  sf.write("| Rule | File | Secret Hash / Snippet |\n")
+                  sf.write("|------|------|------------------------|\n")
+                  for item in data:
+                      rule = item.get("RuleID", "Unknown")
+                      file = item.get("File", "")
+                      secret = item.get("Secret", "")
+                      redacted = secret[:4] + "****" if len(secret) > 4 else "****"
+                      sf.write(f"| `{rule}` | `{file}` | `{redacted}` |\n")
+              else:
+                  sf.write("No hardcoded secrets or credentials detected.\n")
 
-        with open("'"$GITHUB_OUTPUT"'", "a") as out:
-            out.write(f"secrets_detected={'true' if data else 'false'}\n")
-        '
+          with open(gh_output, "a") as out:
+              val = "true" if data else "false"
+              out.write(f"secrets_detected={val}\n")
+          ' "$SUMMARY_FILE" "$REPORT_FILE" "$GITHUB_OUTPUT"
         else
           echo "Fallback to internal regex scan for secrets..."
           python3 -c '
-        import os, re, sys
+          import os, re, sys
 
-        SECRET_PATTERNS = [
-            (r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?token)\s*[:=]\s*[\"\x27][A-Za-z0-9_\-]{16,}[\"\x27]", "Generic API Key"),
-            (r"-----BEGIN (RSA|OPENSSH|DSA|EC) PRIVATE KEY-----", "Private Key"),
-            (r"(?i)drupal_hash_salt\s*[:=]\s*[\"\x27][A-Za-z0-9_\-]{16,}[\"\x27]", "Drupal Hash Salt"),
-            (r"(?i)mysql://[^:]+:[^@]+@[^/]+", "Database URL with Password"),
-        ]
+          summary = sys.argv[1]
+          gh_output = sys.argv[2]
 
-        found = []
-        for root, dirs, files in os.walk("."):
-            if ".git" in dirs: dirs.remove(".git")
-            if "vendor" in dirs: dirs.remove("vendor")
-            if "node_modules" in dirs: dirs.remove("node_modules")
-            for f in files:
-                fpath = os.path.join(root, f)
-                try:
-                    with open(fpath, "r", encoding="utf-8", errors="ignore") as content_file:
-                        txt = content_file.read()
-                        for pattern, label in SECRET_PATTERNS:
-                            if re.search(pattern, txt):
-                                found.append((label, fpath))
-                except Exception:
-                    pass
+          SECRET_PATTERNS = [
+              (r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?token)\s*[:=]\s*[\"\x27][A-Za-z0-9_\-]{16,}[\"\x27]", "Generic API Key"),
+              (r"-----BEGIN (RSA|OPENSSH|DSA|EC) PRIVATE KEY-----", "Private Key"),
+              (r"(?i)drupal_hash_salt\s*[:=]\s*[\"\x27][A-Za-z0-9_\-]{16,}[\"\x27]", "Drupal Hash Salt"),
+              (r"(?i)mysql://[^:]+:[^@]+@[^/]+", "Database URL with Password"),
+          ]
 
-        with open("'"$SUMMARY_FILE"'", "a") as sf:
-            if found:
-                sf.write(f"**Alert:** Found {len(found)} potential secret matches.\n\n")
-                for label, fpath in found:
-                    sf.write(f"- `{label}` detected in `{fpath}`\n")
-            else:
-                sf.write("No hardcoded secrets detected.\n")
+          found = []
+          for root, dirs, files in os.walk("."):
+              if ".git" in dirs: dirs.remove(".git")
+              if "vendor" in dirs: dirs.remove("vendor")
+              if "node_modules" in dirs: dirs.remove("node_modules")
+              for f in files:
+                  fpath = os.path.join(root, f)
+                  try:
+                      with open(fpath, "r", encoding="utf-8", errors="ignore") as content_file:
+                          txt = content_file.read()
+                          for pattern, label in SECRET_PATTERNS:
+                              if re.search(pattern, txt):
+                                  found.append((label, fpath))
+                  except Exception:
+                      pass
 
-        with open("'"$GITHUB_OUTPUT"'", "a") as out:
-            out.write(f"secrets_detected={'true' if found else 'false'}\n")
-        '
+          with open(summary, "a") as sf:
+              if found:
+                  sf.write(f"**Alert:** Found {len(found)} potential secret matches.\n\n")
+                  for label, fpath in found:
+                      sf.write(f"- `{label}` detected in `{fpath}`\n")
+              else:
+                  sf.write("No hardcoded secrets detected.\n")
+
+          with open(gh_output, "a") as out:
+              val = "true" if found else "false"
+              out.write(f"secrets_detected={val}\n")
+          ' "$SUMMARY_FILE" "$GITHUB_OUTPUT"
         fi
 
         cat "$SUMMARY_FILE" >> "$GITHUB_STEP_SUMMARY"

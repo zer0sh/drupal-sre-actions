@@ -147,17 +147,16 @@ runs:
         PAYLOAD_FAIL=false
         if [ -n "${{ inputs.json-field-check }}" ]; then
           CHECK_RES=$(python3 -c '
-        import json, sys
-        expr = """${{ inputs.json-field-check }}"""
-        try:
-            with open("/tmp/probe_response.txt") as f:
-                data = json.load(f)
-            # Evaluate expression in scope of data
-            valid = eval(expr, {}, data)
-            print("OK" if valid else "FAIL")
-        except Exception as e:
-            print(f"ERROR: {e}")
-        ')
+          import json, sys
+          expr = sys.argv[1]
+          try:
+              with open("/tmp/probe_response.txt") as f:
+                  data = json.load(f)
+              valid = eval(expr, {}, data)
+              print("OK" if valid else "FAIL")
+          except Exception as e:
+              print(f"ERROR: {e}")
+          ' "${{ inputs.json-field-check }}")
           if [ "$CHECK_RES" != "OK" ]; then
             PAYLOAD_FAIL=true
             echo "| Payload Validation | \`$CHECK_RES\` | \`${{ inputs.json-field-check }}\` | FAIL |" >> "$SUMMARY_FILE"

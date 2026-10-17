@@ -65,10 +65,8 @@ runs:
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
-        if [ ! -d "/tmp/coder" ]; then
-          echo "Installing drupal/coder standards globally in runner..."
-          composer global require --quiet --no-interaction drupal/coder
-        fi
+        composer global config --no-plugins allow-plugins.dealerdirect/phpcodesniffer-composer-installer true
+        composer global require --quiet --no-interaction drupal/coder
         CODER_DIR="$(composer global config home)/vendor/drupal/coder/coder_sniffer"
         phpcs --config-set installed_paths "$CODER_DIR"
 
