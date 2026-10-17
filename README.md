@@ -226,7 +226,7 @@ on:
 
 jobs:
   drupal-ci:
-    uses: zero-sh/drupal-sre-actions/.github/workflows/reusable-drupal-ci.yml@main
+    uses: zer0sh/drupal-sre-actions/.github/workflows/reusable-drupal-ci.yml@main
     with:
       php-version: '8.3'
       paths: 'web/modules/custom web/themes/custom'
@@ -252,7 +252,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Run Tests in Specific Folder
-        uses: zero-sh/drupal-sre-actions/actions/drupal-test-runner@main
+        uses: zer0sh/drupal-sre-actions/actions/drupal-test-runner@main
         with:
           php-version: '8.3'
           test-directory: 'web/modules/custom/my_module/tests'
@@ -272,7 +272,7 @@ on:
 
 jobs:
   updates:
-    uses: zero-sh/drupal-sre-actions/.github/workflows/reusable-drupal-update.yml@main
+    uses: zer0sh/drupal-sre-actions/.github/workflows/reusable-drupal-update.yml@main
     with:
       php-version: '8.3'
       packages: 'drupal/core-*'
