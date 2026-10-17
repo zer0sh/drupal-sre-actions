@@ -51,13 +51,21 @@ runs:
     - name: Run synthetic health and latency probe
       id: probe
       shell: bash
+      env:
+        TARGET_URL: ${{ inputs.target-url }}
+        EXPECTED_STATUS: ${{ inputs.expected-status }}
+        MAX_TTFB_MS: ${{ inputs.max-ttfb-ms }}
+        SSL_MIN_DAYS: ${{ inputs.ssl-min-days }}
+        RETRIES: ${{ inputs.retries }}
+        RETRY_DELAY_SECONDS: ${{ inputs.retry-delay-seconds }}
+        JSON_FIELD_CHECK: ${{ inputs.json-field-check }}
       run: |
-        URL="${{ inputs.target-url }}"
-        EXPECTED_STATUS="${{ inputs.expected-status }}"
-        MAX_TTFB="${{ inputs.max-ttfb-ms }}"
-        SSL_MIN_DAYS="${{ inputs.ssl-min-days }}"
-        RETRIES="${{ inputs.retries }}"
-        DELAY="${{ inputs.retry-delay-seconds }}"
+        URL="$TARGET_URL"
+        EXPECTED_STATUS="$EXPECTED_STATUS"
+        MAX_TTFB="$MAX_TTFB_MS"
+        SSL_MIN_DAYS="$SSL_MIN_DAYS"
+        RETRIES="$RETRIES"
+        DELAY="$RETRY_DELAY_SECONDS"
         SUMMARY_FILE="/tmp/synthetic_smoke_test_report.md"
 
         echo "### Synthetic Smoke Test & SLO Report" > "$SUMMARY_FILE"
@@ -145,13 +153,13 @@ runs:
 
         # Optional JSON field validation
         PAYLOAD_FAIL=false
-        if [ -n "${{ inputs.json-field-check }}" ]; then
-          CHECK_RES=$(python3 "${{ github.action_path }}/eval_payload.py" "${{ inputs.json-field-check }}" "/tmp/probe_response.txt")
+        if [ -n "$JSON_FIELD_CHECK" ]; then
+          CHECK_RES=$(python3 "${{ github.action_path }}/eval_payload.py" "$JSON_FIELD_CHECK" "/tmp/probe_response.txt")
           if [ "$CHECK_RES" != "OK" ]; then
             PAYLOAD_FAIL=true
-            echo "| Payload Validation | \`$CHECK_RES\` | \`${{ inputs.json-field-check }}\` | FAIL |" >> "$SUMMARY_FILE"
+            echo "| Payload Validation | \`$CHECK_RES\` | \`$JSON_FIELD_CHECK\` | FAIL |" >> "$SUMMARY_FILE"
           else
-            echo "| Payload Validation | \`OK\` | \`${{ inputs.json-field-check }}\` | PASS |" >> "$SUMMARY_FILE"
+            echo "| Payload Validation | \`OK\` | \`$JSON_FIELD_CHECK\` | PASS |" >> "$SUMMARY_FILE"
           fi
         fi
 
